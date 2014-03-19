@@ -1,7 +1,7 @@
 lenticrypt
 ==========
 
-A simple cryptosystem that provides provable plausibly deniable encryption.
+A simple cryptosystem that provides provable [plausibly deniable encryption](http://en.wikipedia.org/wiki/Deniable_encryption).
 
 ## Author
 
