@@ -1,6 +1,6 @@
 #!/usr/bin/env python2
 
-import sys, itertools, random, struct, StringIO
+import sys, itertools, random, struct, StringIO, gzip
 
 ENCRYPTION_VERSION = 1
 
@@ -151,10 +151,10 @@ class IOWrapper:
         self.wrapped = wrapped
         self._file = None
     def __enter__(self):
-        if isinstance(self.wrapped, StringIO.StringIO) or isinstance(self.wrapped, file):
+        if isinstance(self.wrapped, StringIO.StringIO) or isinstance(self.wrapped, gzip.GzipFile) or isinstance(self.wrapped, file):
             return self.wrapped
         else:
-            self._file = open(self.wrapped)
+            self._file = gzip.GzipFile(self.wrapped)
             return self._file.__enter__()
     def __exit__(self, type, value, tb):
         if self._file is not None:
@@ -260,8 +260,9 @@ if __name__ == "__main__":
                 exit(1)
         # let the secret files be garbage collected, if needed:
         secrets = None
-        for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = args.length_header):
-            args.outfile.write(byte)
+        with gzip.GzipFile(fileobj=args.outfile) as zipfile:
+            for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = args.length_header):
+                zipfile.write(byte)
     elif args.decrypt:
         for byte in decrypt(args.decrypt[1], args.decrypt[0]):
             args.outfile.write(chr(byte))
