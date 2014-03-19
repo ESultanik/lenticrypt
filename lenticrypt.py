@@ -2,7 +2,7 @@
 
 import sys, itertools, random, struct, StringIO, gzip
 
-ENCRYPTION_VERSION = 1
+ENCRYPTION_VERSION = 2
 
 def is_power2(num):
 	"""tests if a number is a power of two"""
@@ -235,13 +235,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="A simple cryptosystem with provable plausible deniability.  " + copyright_message)
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("-e", "--encrypt", action="append", nargs=2, type=argparse.FileType('r'), metavar=('secret', 'plaintext'), help="encrypts the given plaintext file(s) into a single ciphertext using the given secret file(s).  Additional secret/plaintext pairs can be specified by providing the `-e` option multiple times.  For example, `-e secret1 plaintext1 -e secret2 plaintext2 -e secret3 plaintext3 ...`.  Any plaintext that is longer than the first one provided will be truncated.  Any plaintext that is shorter than the first one provided will be tail-padded with zeros.")
+    group.add_argument("-e", "--encrypt", action="append", nargs=2, type=argparse.FileType('r'), metavar=('secret', 'plaintext'), help="encrypts the given plaintext file(s) into a single ciphertext using the given secret file(s).  Additional secret/plaintext pairs can be specified by providing the `-e` option multiple times.  For example, `-e secret1 plaintext1 -e secret2 plaintext2 -e secret3 plaintext3 ...`.  If the `-l` argument is used, any plaintext that is longer than the first one provided will be truncated.  Any plaintext that is shorter than the first one provided will be tail-padded with zeros.")
     group.add_argument("-d", "--decrypt", nargs=2, type=str, metavar=('secret', 'ciphertext'), help="decrypts the ciphertext file using the given secret file")
     group.add_argument("-t", "--test", type=argparse.FileType('r'), nargs="+", metavar=('secret'), help="tests whether a given set of secrets have sufficient entropy to encrypt an equal number of plaintexts.  The exit code of the program is zero on success.  On failure, the missing byte combinations are printed to stdout.")
     
     parser.add_argument("-f", "--force-encrypt", action="store_true", default=False, help="force encryption, even if the secrets have insufficient entropy to correctly encrypt the plaintexts")
     parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('w'), default=sys.stdout, help="the output file (default to stdout)")
-    parser.add_argument("-l", "--length-header", action="store_true", default=False, help="add a header to the beginning that specifies the length of the encrypted files.  This solves the problem of having plaintexts of unequal length.")
+    parser.add_argument("-l", "--same-length", action="store_true", default=False, help="removes the header that is used to specify the length of the encrypted files.  The solves the problem of having plaintexts of unequal length.  Without it, encryption might be lossy if the plaintexts are not the same length, however, there is slightly greater plausible deniability.")
     group.add_argument("-v", "--version", action="store_true", default=False, help="prints version information")
 
     args = parser.parse_args()
@@ -261,7 +261,7 @@ if __name__ == "__main__":
         # let the secret files be garbage collected, if needed:
         secrets = None
         with gzip.GzipFile(fileobj=args.outfile) as zipfile:
-            for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = args.length_header):
+            for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = not args.same_length):
                 zipfile.write(byte)
     elif args.decrypt:
         for byte in decrypt(args.decrypt[1], args.decrypt[0]):
