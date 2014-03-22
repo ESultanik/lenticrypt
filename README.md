@@ -6,7 +6,7 @@ A simple cryptosystem that provides provable [plausibly deniable encryption](htt
 ## Usage
 
 ```shell
-$ python lenticrypt.py -e key1 plaintext1 key2 plaintext2 -o output.enc
+$ python lenticrypt.py -e key1 plaintext1 -e key2 plaintext2 -o output.enc
 
 $ python lenticrypt.py -d key1 output.enc | diff - plaintext1 -s
 Files - and plaintext1 are identical
