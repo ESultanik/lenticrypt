@@ -5,8 +5,8 @@ import sys, itertools, random, struct, StringIO, gzip
 ENCRYPTION_VERSION = 2
 
 def is_power2(num):
-	"""tests if a number is a power of two"""
-	return num != 0 and ((num & (num - 1)) == 0)
+    """tests if a number is a power of two"""
+    return num != 0 and ((num & (num - 1)) == 0)
 
 def read_nibble_gram(byte_array, index, length):
     assert(is_power2(length))
