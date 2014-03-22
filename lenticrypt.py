@@ -233,7 +233,7 @@ if __name__ == "__main__":
     
     copyright_message = "Copyright (C) 2012--2014, Evan A. Sultanik, Ph.D.  \nhttp://www.sultanik.com/\n"
 
-    parser = argparse.ArgumentParser(description="A simple cryptosystem with provable plausible deniability.  " + copyright_message)
+    parser = argparse.ArgumentParser(description="A simple cryptosystem with provable plausible deniability.  " + copyright_message, prog="lenticrypt")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("-e", "--encrypt", action="append", nargs=2, type=argparse.FileType('r'), metavar=('secret', 'plaintext'), help="encrypts the given plaintext file(s) into a single ciphertext using the given secret file(s).  Additional secret/plaintext pairs can be specified by providing the `-e` option multiple times.  For example, `-e secret1 plaintext1 -e secret2 plaintext2 -e secret3 plaintext3 ...`.  If the `-l` argument is used, any plaintext that is longer than the first one provided will be truncated.  Any plaintext that is shorter than the first one provided will be tail-padded with zeros.")
     group.add_argument("-d", "--decrypt", nargs=2, type=str, metavar=('secret', 'ciphertext'), help="decrypts the ciphertext file using the given secret file")
@@ -243,6 +243,12 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('w'), default=sys.stdout, help="the output file (default to stdout)")
     parser.add_argument("-l", "--same-length", action="store_true", default=False, help="removes the header that is used to specify the length of the encrypted files.  The solves the problem of having plaintexts of unequal length.  Without it, encryption might be lossy if the plaintexts are not the same length, however, there is slightly greater plausible deniability.")
     group.add_argument("-v", "--version", action="store_true", default=False, help="prints version information")
+    compression_group = parser.add_mutually_exclusive_group()
+    compression_group.add_argument("-1","--fast", action="store_true", default="False")
+    compression_group.add_argument("-2", dest="two", action="store_true", default="False")
+    compression_group.add_argument("-3", dest="three", action="store_true", default="False")
+    compression_group.add_argument("-4", dest="four", action="store_true", default="True")
+    compression_group.add_argument("-5","--best", action="store_true", default="False", help="These options change the compression level used, with the -1 option being the fastest, with less compression, and the -5 option being the slowest, with best compression.  CPU and memory usage will increase exponentially as the compression level increases.  The default compression level is -4.")
 
     args = parser.parse_args()
 
@@ -250,7 +256,16 @@ if __name__ == "__main__":
         sys.stdout.write("Cryptosystem Version: " + str(ENCRYPTION_VERSION / 10.0) + "\n" + copyright_message + "\n")
     elif args.encrypt:
         secrets = map(lambda s : bytearray(s[0].read()), args.encrypt)
-        substitution_alphabet = find_common_nibble_grams(secrets)
+        nibble_gram_lengths = [1, 2, 4, 8, 16]
+        if args.fast:
+            nibble_gram_lengths = nibble_gram_lengths[:1]
+        elif args.two:
+            nibble_gram_lengths = nibble_gram_lengths[:2]
+        elif args.three:
+            nibble_gram_lengths = nibble_gram_lengths[:3]
+        elif args.four:
+            nibble_gram_lengths = nibble_gram_lengths[:4]
+        substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = nibble_gram_lengths)
         if len(substitution_alphabet[1]) < 16**len(secrets):
             err_msg = "there is not sufficient coverage between the certificates to encrypt all possible bytes!\n"
             if args.force_encrypt:
@@ -268,7 +283,7 @@ if __name__ == "__main__":
             args.outfile.write(chr(byte))
     elif args.test:
         secrets = map(lambda s : bytearray(s.read()), args.test)
-        substitution_alphabet = find_common_nibble_grams(secrets)
+        substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = [1])
         if len(substitution_alphabet[1]) < 16**len(secrets):
             sys.stderr.write("There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:\n")
             sys.stderr.flush()
