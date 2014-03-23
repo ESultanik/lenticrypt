@@ -346,8 +346,12 @@ if __name__ == "__main__":
     compression_group.add_argument("-3", dest="three", action="store_true", default="False")
     compression_group.add_argument("-4", dest="four", action="store_true", default="True")
     compression_group.add_argument("-5","--best", action="store_true", default="False", help="These options change the compression level used, with the -1 option being the fastest, with less compression, and the -5 option being the slowest, with best compression.  CPU and memory usage will increase exponentially as the compression level increases.  The default compression level is -4.")
+    parser.add_argument("-s", "--seed", type=int, default=None, help="seeds the random number generator to the given value")
 
     args = parser.parse_args()
+    
+    if args.seed is not None:
+        random.seed(args.seed)
 
     if args.version:
         sys.stdout.write("Cryptosystem Version: " + str(ENCRYPTION_VERSION / 10.0) + "\n" + copyright_message + "\n")
@@ -372,7 +376,8 @@ if __name__ == "__main__":
                 exit(1)
         # let the secret files be garbage collected, if needed:
         secrets = None
-        with gzip.GzipFile(fileobj=args.outfile) as zipfile:
+        with gzip.GzipFile(fileobj=args.outfile, mtime=1) as zipfile:
+            # mtime is set to 1 so that the output files are always identical if a random seed argument is provided
             for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = not args.same_length, quiet = args.quiet):
                 zipfile.write(byte)
     elif args.decrypt:
