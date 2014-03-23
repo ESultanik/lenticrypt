@@ -1,8 +1,79 @@
 #!/usr/bin/env python2
 
-import sys, itertools, random, struct, StringIO, gzip
+import os, sys, itertools, random, struct, StringIO, gzip
 
 ENCRYPTION_VERSION = 2
+
+def get_terminal_size():
+    env = os.environ
+    def ioctl_GWINSZ(fd):
+        try:
+            import fcntl, termios, struct, os
+            cr = struct.unpack('hh', fcntl.ioctl(fd, termios.TIOCGWINSZ,
+        '1234'))
+        except:
+            return
+        return cr
+    cr = ioctl_GWINSZ(0) or ioctl_GWINSZ(1) or ioctl_GWINSZ(2)
+    if not cr:
+        try:
+            fd = os.open(os.ctermid(), os.O_RDONLY)
+            cr = ioctl_GWINSZ(fd)
+            os.close(fd)
+        except:
+            pass
+    if not cr:
+        cr = (env.get('LINES', 25), env.get('COLUMNS', 80))
+    return int(cr[1]), int(cr[0])
+
+class StatusLine(object):
+    def __init__(self, stream = sys.stderr):
+        self.stream = stream
+        self.clear()
+    def clear(self):
+        width, height = get_terminal_size()
+        self.stream.write("\r" + " "*width + "\r")
+    def write(self, text):
+        self.stream.write(text)
+
+class ProgressBar(StatusLine):
+    def __init__(self, stream = sys.stderr, max_value = 100):
+        super(ProgressBar, self).__init__(stream)
+        self.max_value = max_value
+        self.value = 0
+        self._last_percent = -1
+    def update(self, value, status = ""):
+        self.value = value
+        percent = float(value) / float(self.max_value)
+        if percent < 0:
+            percent = 0
+        elif percent > 1.0:
+            percent = 1.0
+        if int(percent * 100.0 + 0.5) != self._last_percent:
+            self._last_percent = int(percent * 100.0 + 0.5)
+            width, height = get_terminal_size()
+            width -= 2
+            pixels = int(float(width) * percent + 0.5)
+            self.clear()
+            self.write("[")
+            if len(status) > 0:
+                s = "%s %d%%" % (status, int(percent * 100.0 + 0.5))
+            else:
+                s = "%d%%" % int(percent * 100.0 + 0.5)
+            status_start = (width - len(s)) / 2
+            for i in range(width):
+                if i == status_start:
+                    for j in range(len(s)):
+                        if s[j] == ' ' and j + i < pixels:
+                            s = s[:j] + '=' + s[j+1:]
+                    self.write(s)
+                elif i > status_start and i < status_start + len(s):
+                    pass
+                elif i < pixels:
+                    self.write("=")
+                else:
+                    self.write("-")
+            self.write("]")
 
 def is_power2(num):
     """tests if a number is a power of two"""
@@ -20,17 +91,25 @@ def read_nibble_gram(byte_array, index, length):
     else:
         return tuple(byte_array[offset:offset+length/2])
 
-def find_common_nibble_grams(certificates, nibble_gram_lengths = [1, 2, 4, 8, 16]):
+def find_common_nibble_grams(certificates, nibble_gram_lengths = [1, 2, 4, 8, 16], quiet=False):
     all_nibbles = {} # maps a nibble value to a common index
     for nibble_gram_length in nibble_gram_lengths:
         nibbles = {}
         all_nibbles[nibble_gram_length] = nibbles
-        for index in range(0,min(map(len, certificates))*2 - nibble_gram_length + 1):
+        range_max = min(map(len, certificates))*2 - nibble_gram_length + 1
+        pb = None
+        if not quiet:
+            pb = ProgressBar(max_value = range_max)
+        for index in range(0,range_max):
             pair = tuple(map(lambda c : read_nibble_gram(c, index, nibble_gram_length), certificates))
             if pair in nibbles:
                 nibbles[pair].append(index)
             else:
                 nibbles[pair] = [index]
+            if pb is not None:
+                pb.update(index, "Building Index for %s-nibble-grams" % nibble_gram_length)
+        if pb is not None:
+            pb.clear()
     return all_nibbles
 
 class BufferedNibbleGramReader:
@@ -89,22 +168,37 @@ def get_length(stream):
 #                 |-----| <-- index_bytes - 1 (since index_bytes is always greater than zero)
 #         |-------| <-- length - 1 (since length is always greater than zero)
 #       |-| <-- If 1, then the following 7 bits are a filetype version number and the following blocks are the encrypted 8 bytes encoding the length of the file
-def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False):
+def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False, quiet=False):
     if add_length_checksum:
         block_header = 0b10000000 | ENCRYPTION_VERSION # the magic length checksum bit and filetype version number
         yield chr(block_header)
         lengths = map(lambda l : StringIO.StringIO(struct.pack("<Q", l)), map(get_length, to_encrypt))
-        for b in encrypt(substitution_alphabet, lengths, add_length_checksum=False):
+        for b in encrypt(substitution_alphabet, lengths, add_length_checksum=False, quiet=True):
             yield b
     sorted_lengths = sorted(substitution_alphabet.keys(), reverse=True)
+    buffer_lengths = None
+    if not quiet:
+        buffer_lengths = [get_length(b) for b in to_encrypt]
     buffers = [BufferedNibbleGramReader(e, sorted_lengths[0]) for e in to_encrypt]
+    max_length = None
     if add_length_checksum:
         completion_test = lambda : sum(map(lambda b : not b.eof(), buffers))
+        if not quiet:
+            max_length = max(buffer_lengths)
     else:
         completion_test = lambda : buffers[0]
+        if not quiet:
+            max_length = buffer_lenghts[0]
+    pb = None
+    if not quiet:
+        pb = ProgressBar(max_value = max_length * len(sorted_lengths) * 2)
+    count = 0
     while completion_test():
         # if the files are not the same length, encrypt to the length of to_encrypt1
         for length in sorted_lengths:
+            if not quiet:
+                count += 1
+                pb.update(count, "Encrypting")
             ng = []
             for i, b in enumerate(buffers):
                 n = b.peek_nibbles(length)
@@ -139,6 +233,8 @@ def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False):
                 # consume these bytes
                 for b in buffers:
                     b.get_nibbles(length)
+    if not quiet:
+        pb.clear()
 
 index_type_map = {
     1 : 'B',
@@ -243,6 +339,7 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('w'), default=sys.stdout, help="the output file (default to stdout)")
     parser.add_argument("-l", "--same-length", action="store_true", default=False, help="removes the header that is used to specify the length of the encrypted files.  The solves the problem of having plaintexts of unequal length.  Without it, encryption might be lossy if the plaintexts are not the same length, however, there is slightly greater plausible deniability.")
     group.add_argument("-v", "--version", action="store_true", default=False, help="prints version information")
+    parser.add_argument("-q", "--quiet", action="store_true", default=False, help="suppresses log messages")
     compression_group = parser.add_mutually_exclusive_group()
     compression_group.add_argument("-1","--fast", action="store_true", default="False")
     compression_group.add_argument("-2", dest="two", action="store_true", default="False")
@@ -265,7 +362,7 @@ if __name__ == "__main__":
             nibble_gram_lengths = nibble_gram_lengths[:3]
         elif args.four:
             nibble_gram_lengths = nibble_gram_lengths[:4]
-        substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = nibble_gram_lengths)
+        substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = nibble_gram_lengths, quiet = args.quiet)
         if len(substitution_alphabet[1]) < 16**len(secrets):
             err_msg = "there is not sufficient coverage between the certificates to encrypt all possible bytes!\n"
             if args.force_encrypt:
@@ -276,7 +373,7 @@ if __name__ == "__main__":
         # let the secret files be garbage collected, if needed:
         secrets = None
         with gzip.GzipFile(fileobj=args.outfile) as zipfile:
-            for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = not args.same_length):
+            for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = not args.same_length, quiet = args.quiet):
                 zipfile.write(byte)
     elif args.decrypt:
         for byte in decrypt(args.decrypt[1], args.decrypt[0]):
