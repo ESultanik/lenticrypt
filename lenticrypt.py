@@ -75,6 +75,17 @@ class ProgressBar(StatusLine):
                     self.write("-")
             self.write("]")
 
+class ProgressBarCallback:
+    def __init__(self):
+        self.pb = None
+    def __call__(self, value, max_value, status = ""):
+        if self.pb is None:
+            self.pb = ProgressBar(max_value = max_value)
+        self.pb.update(value, status)
+    def clear(self):
+        if self.pb is not None:
+            self.pb.clear()
+
 def is_power2(num):
     """tests if a number is a power of two"""
     return num != 0 and ((num & (num - 1)) == 0)
@@ -91,25 +102,20 @@ def read_nibble_gram(byte_array, index, length):
     else:
         return tuple(byte_array[offset:offset+length/2])
 
-def find_common_nibble_grams(certificates, nibble_gram_lengths = [1, 2, 4, 8, 16], quiet=False):
+def find_common_nibble_grams(certificates, nibble_gram_lengths = [1, 2, 4, 8, 16], status_callback=None):
     all_nibbles = {} # maps a nibble value to a common index
     for nibble_gram_length in nibble_gram_lengths:
         nibbles = {}
         all_nibbles[nibble_gram_length] = nibbles
         range_max = min(map(len, certificates))*2 - nibble_gram_length + 1
-        pb = None
-        if not quiet:
-            pb = ProgressBar(max_value = range_max)
         for index in range(0,range_max):
             pair = tuple(map(lambda c : read_nibble_gram(c, index, nibble_gram_length), certificates))
             if pair in nibbles:
                 nibbles[pair].append(index)
             else:
                 nibbles[pair] = [index]
-            if pb is not None:
-                pb.update(index, "Building Index for %s-nibble-grams" % nibble_gram_length)
-        if pb is not None:
-            pb.clear()
+            if status_callback is not None:
+                status_callback(index, range_max, "Building Index for %s-nibble-grams" % nibble_gram_length)
     return all_nibbles
 
 class BufferedNibbleGramReader:
@@ -168,37 +174,36 @@ def get_length(stream):
 #                 |-----| <-- index_bytes - 1 (since index_bytes is always greater than zero)
 #         |-------| <-- length - 1 (since length is always greater than zero)
 #       |-| <-- If 1, then the following 7 bits are a filetype version number and the following blocks are the encrypted 8 bytes encoding the length of the file
-def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False, quiet=False):
+def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False, status_callback=None):
     if add_length_checksum:
         block_header = 0b10000000 | ENCRYPTION_VERSION # the magic length checksum bit and filetype version number
         yield chr(block_header)
         lengths = map(lambda l : StringIO.StringIO(struct.pack("<Q", l)), map(get_length, to_encrypt))
-        for b in encrypt(substitution_alphabet, lengths, add_length_checksum=False, quiet=True):
+        for b in encrypt(substitution_alphabet, lengths, add_length_checksum=False, status_callback=None):
             yield b
     sorted_lengths = sorted(substitution_alphabet.keys(), reverse=True)
     buffer_lengths = None
-    if not quiet:
+    if status_callback is not None:
         buffer_lengths = [get_length(b) for b in to_encrypt]
     buffers = [BufferedNibbleGramReader(e, sorted_lengths[0]) for e in to_encrypt]
     max_length = None
     if add_length_checksum:
         completion_test = lambda : sum(map(lambda b : not b.eof(), buffers))
-        if not quiet:
+        if status_callback is not None:
             max_length = max(buffer_lengths)
     else:
         completion_test = lambda : buffers[0]
-        if not quiet:
+        if status_callback is not None:
             max_length = buffer_lenghts[0]
-    pb = None
-    if not quiet:
-        pb = ProgressBar(max_value = max_length * len(sorted_lengths) * 2)
+    if status_callback is not None:
+        max_length *= len(sorted_lengths) * 2
     count = 0
     while completion_test():
         # if the files are not the same length, encrypt to the length of to_encrypt1
         for length_num, length in enumerate(sorted_lengths):
-            if not quiet:
+            if status_callback is not None:
                 count += 1
-                pb.update(count, "Encrypting")
+                status_callback(count, max_length, "Encrypting")
             ng = []
             for i, b in enumerate(buffers):
                 n = b.peek_nibbles(length)
@@ -232,7 +237,7 @@ def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False, quiet=
                 assert(length <= 16) # if we want to support longer lengths, we will have to allocate more bits in the header, pearhaps using the currently used one
                 block_header = ((length - 1) << 3) | (index_bytes - 1)
                 yield struct.pack("<B" + index_type, block_header, index)
-                if not quiet:
+                if status_callback is not None:
                     count += len(sorted_lengths) - (length_num + 1)
                 break
             elif length == 1:
@@ -240,8 +245,6 @@ def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False, quiet=
                 # consume these bytes
                 for b in buffers:
                     b.get_nibbles(length)
-    if not quiet:
-        pb.clear()
 
 index_type_map = {
     1 : 'B',
@@ -373,7 +376,12 @@ if __name__ == "__main__":
             nibble_gram_lengths = nibble_gram_lengths[:3]
         elif args.four:
             nibble_gram_lengths = nibble_gram_lengths[:4]
-        substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = nibble_gram_lengths, quiet = args.quiet)
+        callback = None
+        if not args.quiet:
+            callback = ProgressBarCallback()
+        substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = nibble_gram_lengths, status_callback = callback)
+        if callback is not None:
+            callback.clear()
         if len(substitution_alphabet[1]) < 16**len(secrets):
             err_msg = "there is not sufficient coverage between the certificates to encrypt all possible bytes!\n"
             if args.force_encrypt:
@@ -385,14 +393,24 @@ if __name__ == "__main__":
         secrets = None
         with gzip.GzipFile(fileobj=args.outfile, mtime=1) as zipfile:
             # mtime is set to 1 so that the output files are always identical if a random seed argument is provided
-            for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = not args.same_length, quiet = args.quiet):
+            callback = None
+            if not args.quiet:
+                callback = ProgressBarCallback()
+            for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = not args.same_length, status_callback = callback):
                 zipfile.write(byte)
+            if callback is not None:
+                callback.clear()
     elif args.decrypt:
         for byte in decrypt(args.decrypt[1], args.decrypt[0]):
             args.outfile.write(chr(byte))
     elif args.test:
         secrets = map(lambda s : bytearray(s.read()), args.test)
-        substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = [1])
+        callback = None
+        if not args.quiet:
+            callback = ProgressBarCallback()
+        substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = [1], status_callback = callback)
+        if callback is not None:
+            callback.clear()
         if len(substitution_alphabet[1]) < 16**len(secrets):
             sys.stderr.write("There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:\n")
             sys.stderr.flush()
