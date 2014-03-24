@@ -195,7 +195,7 @@ def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False, quiet=
     count = 0
     while completion_test():
         # if the files are not the same length, encrypt to the length of to_encrypt1
-        for length in sorted_lengths:
+        for length_num, length in enumerate(sorted_lengths):
             if not quiet:
                 count += 1
                 pb.update(count, "Encrypting")
@@ -204,9 +204,14 @@ def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False, quiet=
                 n = b.peek_nibbles(length)
                 if n is None and (i > 0 or add_length_checksum):
                     # this will happen if this plaintext is shorter than the first plaintext; just pad its tail with zeros
-                    n = tuple([0]*length)
+                    if add_length_checksum:
+                        # but if we are using a length checksum, we can make the padded bytes random:
+                        #n = tuple([random.randint(0, 255) for j in range(length)])
+                        n = tuple([0]*length)
+                    else:
+                        n = tuple([0]*length)
                 ng.append(n)
-            if ng[0] is None and not add_length_checksum:
+            if (ng[0] is None and not add_length_checksum) or max(map(len,ng)) < length:
                 continue
             pair = tuple(ng)
             if pair in substitution_alphabet[length]:
@@ -228,6 +233,9 @@ def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False, quiet=
                 assert(length <= 16) # if we want to support longer lengths, we will have to allocate more bits in the header, pearhaps using the currently used one
                 block_header = ((length - 1) << 3) | (index_bytes - 1)
                 yield struct.pack("<B" + index_type, block_header, index)
+                if not quiet:
+                    count += len(sorted_lengths) - (length_num + 1)
+                break
             elif length == 1:
                 sys.stderr.write("Warning: there is insufficient entropy in the input secrets to encode the byte pair " + str(pair) + "! The resulting ciphertext will not decrypt to the correct plaintext.\n")
                 # consume these bytes
