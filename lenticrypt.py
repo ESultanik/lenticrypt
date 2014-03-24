@@ -206,8 +206,7 @@ def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False, quiet=
                     # this will happen if this plaintext is shorter than the first plaintext; just pad its tail with zeros
                     if add_length_checksum:
                         # but if we are using a length checksum, we can make the padded bytes random:
-                        #n = tuple([random.randint(0, 255) for j in range(length)])
-                        n = tuple([0]*length)
+                        n = tuple([random.randint(0, 15) for j in range(length)])
                     else:
                         n = tuple([0]*length)
                 ng.append(n)
