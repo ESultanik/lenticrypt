@@ -379,9 +379,14 @@ if __name__ == "__main__":
         callback = None
         if not args.quiet:
             callback = ProgressBarCallback()
-        substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = nibble_gram_lengths, status_callback = callback)
-        if callback is not None:
-            callback.clear()
+        try:
+            substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = nibble_gram_lengths, status_callback = callback)
+        except (KeyboardInterrupt, SystemExit):
+            # die gracefully, without a stacktrace
+            exit(1)
+        finally:
+            if callback is not None:
+                callback.clear()
         if len(substitution_alphabet[1]) < 16**len(secrets):
             err_msg = "there is not sufficient coverage between the certificates to encrypt all possible bytes!\n"
             if args.force_encrypt:
@@ -391,26 +396,40 @@ if __name__ == "__main__":
                 exit(1)
         # let the secret files be garbage collected, if needed:
         secrets = None
-        with gzip.GzipFile(fileobj=args.outfile, mtime=1) as zipfile:
-            # mtime is set to 1 so that the output files are always identical if a random seed argument is provided
-            callback = None
-            if not args.quiet:
-                callback = ProgressBarCallback()
-            for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = not args.same_length, status_callback = callback):
-                zipfile.write(byte)
+        callback = None
+        if not args.quiet:
+            callback = ProgressBarCallback()
+        try:
+            with gzip.GzipFile(fileobj=args.outfile, mtime=1) as zipfile:
+                # mtime is set to 1 so that the output files are always identical if a random seed argument is provided
+                for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = not args.same_length, status_callback = callback):
+                    zipfile.write(byte)
+        except (KeyboardInterrupt, SystemExit):
+            # die gracefully, without a stacktrace
+            exit(1)
+        finally:
             if callback is not None:
                 callback.clear()
     elif args.decrypt:
-        for byte in decrypt(args.decrypt[1], args.decrypt[0]):
-            args.outfile.write(chr(byte))
+        try:
+            for byte in decrypt(args.decrypt[1], args.decrypt[0]):
+                args.outfile.write(chr(byte))
+        except (KeyboardInterrupt, SystemExit):
+            # die gracefully, without a stacktrace
+            exit(1)
     elif args.test:
         secrets = map(lambda s : bytearray(s.read()), args.test)
         callback = None
         if not args.quiet:
             callback = ProgressBarCallback()
-        substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = [1], status_callback = callback)
-        if callback is not None:
-            callback.clear()
+        try:
+            substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = [1], status_callback = callback)
+        except (KeyboardInterrupt, SystemExit):
+            # die gracefully, without a stacktrace
+            exit(1)
+        finally:
+            if callback is not None:
+                callback.clear()
         if len(substitution_alphabet[1]) < 16**len(secrets):
             sys.stderr.write("There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:\n")
             sys.stderr.flush()
