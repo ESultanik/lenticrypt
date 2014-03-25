@@ -347,7 +347,7 @@ if __name__ == "__main__":
     
     parser.add_argument("-f", "--force-encrypt", action="store_true", default=False, help="force encryption, even if the secrets have insufficient entropy to correctly encrypt the plaintexts")
     parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('w'), default=sys.stdout, help="the output file (default to stdout)")
-    parser.add_argument("-l", "--same-length", action="store_true", default=False, help="removes the header that is used to specify the length of the encrypted files.  The solves the problem of having plaintexts of unequal length.  Without it, encryption might be lossy if the plaintexts are not the same length, however, there is slightly greater plausible deniability.")
+    parser.add_argument("-l", "--same-length", action="store_true", default=False, help="removes the header that is used to specify the length of the encrypted files.  The header solves the problem of having plaintexts of unequal length, so with this option enabled encryption might be lossy if the plaintexts are not the same length.  This option does slightly strengthen plausible deniability.")
     group.add_argument("-v", "--version", action="store_true", default=False, help="prints version information")
     parser.add_argument("-q", "--quiet", action="store_true", default=False, help="suppresses log messages")
     compression_group = parser.add_mutually_exclusive_group()
