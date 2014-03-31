@@ -2,7 +2,7 @@
 
 import os, sys, itertools, random, struct, StringIO, gzip
 
-ENCRYPTION_VERSION = 2
+ENCRYPTION_VERSION = 3
 
 def get_terminal_size():
     env = os.environ
@@ -168,6 +168,139 @@ def get_length(stream):
         length += len(r)
     stream.seek(old_position)
     return length
+
+class Encrypter(object):
+    def __init__(self, substitution_alphabet, to_encrypt, add_length_checksum=False, status_callback=None):
+        self.substitution_alphabet = substitution_alphabet
+        self.to_encrypt = to_encrypt
+        self.sorted_lengths = sorted(substitution_alphabet.keys(), reverse=True)
+        self.buffer_lengths = None
+        if self.status_callback is not None:
+            self.buffer_lengths = [get_length(b) for b in self.to_encrypt]
+
+    def get_header(self):
+        return iter([])
+
+    def is_incomplete(self, buffers):
+        return buffers[0]
+
+    def get_max_length(self):
+        if self.status_callback is None:
+            return None
+        else:
+            return self.buffer_lengths[0]
+
+    def process_nibble(self, n, buffer_index):
+        if n is None and buffer_index > 0:
+            return tuple([0]*length)
+        else:
+            return n
+
+    def get_tuple(self, ng, length):
+        if ng[0] is None or max(map(len,ng)) < length:
+            return None
+        else:
+            return tuple(ng)
+
+    def are_valid_nibbles(self, ng, length):
+        return not (ng[0] is None or max(map(len,ng)) < length)
+
+    def process_nibbles(self, ng, length, buffers):
+        pair = tuple(ng)
+        if pair in self.substitution_alphabet[length]:
+            # consume the nibbles!
+            for b in buffers:
+                b.get_nibbles(length)
+            index = random.choice(self.substitution_alphabet[length][pair])
+            index_bytes = 8
+            index_type = "Q" # unsigned long long
+            if index < 256:
+                index_bytes = 1
+                index_type = "B" # unsigned char
+            elif index < 65536:
+                index_bytes = 2
+                index_type = "H" # unsigned short
+            elif index < 4294967296:
+                index_bytes = 4
+                index_type = "L" # unsigned long
+            assert(length <= 16) # if we want to support longer lengths, we will have to allocate more bits in the header, pearhaps using the currently used one
+            block_header = ((length - 1) << 3) | (index_bytes - 1)
+            yield struct.pack("<B" + index_type, block_header, index)
+        elif length == 1:
+            sys.stderr.write("Warning: there is insufficient entropy in the input secrets to encode the byte pair " + str(pair) + "! The resulting ciphertext will not decrypt to the correct plaintext.\n")
+            # consume these bytes
+            for b in buffers:
+                b.get_nibbles(length)
+
+    def __iter__(self):
+        for byte in self.get_header():
+            yield byte
+        buffers = [BufferedNibbleGramReader(e, sorted_lengths[0]) for e in to_encrypt]
+        max_length = self.get_max_length()
+        if status_callback is not None:
+            max_length *= len(sorted_lengths) * 2
+        count = 0
+        while self.is_incomplete():
+            # if the files are not the same length, encrypt to the length of to_encrypt1
+            for length_num, length in enumerate(sorted_lengths):
+                if status_callback is not None:
+                    count += 1
+                    status_callback(count, max_length, "Encrypting")
+                ng = []
+                for i, b in enumerate(buffers):
+                    n = b.peek_nibbles(length)
+                    ng.append(self.process_nibble(n, i))
+                if not self.are_valid_nibbles(ng, length):
+                    continue
+                success = False
+                for byte in self.process_nibbles(ng, length, buffers):
+                    success = True
+                    yield byte
+                    if status_callback is not None:
+                        count += len(sorted_lengths) - (length_num + 1)
+                if success:
+                    break
+
+class LengthChecksumEncrypter(Encrypter):
+    def __init__(self, substitution_alphabet, to_encrypt, status_callback=None):
+        super(DictionaryEncrypter, self).__init__(substitution_alphabet = substitution_alphabet, to_encrypt = to_encrypt, status_callback = status_callback)
+
+    def get_encryption_version(self):
+        return 2
+
+    def is_incomplete(self, buffers):
+        return sum(map(lambda b : not b.eof(), buffers))
+
+    def get_max_length(self):
+        if status_callback is None:
+            return None
+        else:
+            return max(buffer_lengths)
+
+    def are_valid_nibbles(self, ng, length):
+        return not max(map(len,ng)) < length
+
+    def process_nibble(self, n, buffer_index):
+        if n is None:
+            # if we are using a length checksum, we can make the padded bytes random:
+            return tuple([random.randint(0, 15) for j in range(length)])
+        else:
+            return n
+
+    def get_header(self):
+        block_header = 0b10000000 | self.get_encryption_version() # the magic length checksum bit and filetype version number
+        yield chr(block_header)
+        lengths = map(lambda l : StringIO.StringIO(struct.pack("<Q", l)), map(get_length, self.to_encrypt))
+        for b in Encrypter(self.substitution_alphabet, lengths, status_callback=None):
+            yield b
+
+# An encrypter for version 3 of the file spec.
+class DictionaryEncrypter(LengthChecksumEncrypter):
+    def __init__(self, substitution_alphabet, to_encrypt, status_callback=None):
+        super(DictionaryEncrypter, self).__init__(substitution_alphabet = substitution_alphabet, to_encrypt = to_encrypt, status_callback = status_callback)
+
+    def get_encryption_version(self):
+        return 3
 
 # block header, 8 bits:
 # MSB -> X X X X X X X X <- LSB
