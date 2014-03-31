@@ -194,7 +194,7 @@ def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False, status
     else:
         completion_test = lambda : buffers[0]
         if status_callback is not None:
-            max_length = buffer_lenghts[0]
+            max_length = buffer_lengths[0]
     if status_callback is not None:
         max_length *= len(sorted_lengths) * 2
     count = 0
@@ -236,7 +236,8 @@ def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False, status
                     index_type = "L" # unsigned long
                 assert(length <= 16) # if we want to support longer lengths, we will have to allocate more bits in the header, pearhaps using the currently used one
                 block_header = ((length - 1) << 3) | (index_bytes - 1)
-                yield struct.pack("<B" + index_type, block_header, index)
+                for byte in struct.pack("<B" + index_type, block_header, index):
+                    yield byte
                 if status_callback is not None:
                     count += len(sorted_lengths) - (length_num + 1)
                 break
@@ -252,25 +253,33 @@ index_type_map = {
     4 : 'L',
     8 : 'Q'}
 
-class IOWrapper:
+class IOWrapper(object):
     def __init__(self, wrapped):
         self.wrapped = wrapped
         self._file = None
+    def new_instance(self):
+        return open(self.wrapped)
     def __enter__(self):
         if isinstance(self.wrapped, StringIO.StringIO) or isinstance(self.wrapped, gzip.GzipFile) or isinstance(self.wrapped, file):
             return self.wrapped
         else:
-            self._file = gzip.GzipFile(self.wrapped)
+            self._file = self.new_instance()
             return self._file.__enter__()
     def __exit__(self, type, value, tb):
         if self._file is not None:
             self._file.__exit__(type, value, tb)
 
-def decrypt(ciphertext_file, certificate_file, cert = None, file_length = None):
+class GzipIOWrapper(IOWrapper):
+    def __init__(self, wrapped):
+        super(GzipIOWrapper, self).__init__(wrapped)
+    def new_instance(self):
+        return gzip.GzipFile(self.wrapped)
+
+def decrypt(ciphertext, certificate, cert = None, file_length = None):
     # the file format is specified in a comment at the top of the encrypt(...) function above.
     if cert is None:
         cert = []
-        with open(certificate_file) as stream:
+        with IOWrapper(certificate) as stream:
             while True:
                 b = stream.read(1)
                 if not b:
@@ -278,7 +287,7 @@ def decrypt(ciphertext_file, certificate_file, cert = None, file_length = None):
                 b = ord(b[0]) & 0b11111111
                 cert.append((b & 0b11110000) >> 4)
                 cert.append(b & 0b00001111)
-    with IOWrapper(ciphertext_file) as stream:
+    with GzipIOWrapper(ciphertext) as stream:
         last_nibble = None
         num_bytes = 0
         while True:
@@ -431,6 +440,7 @@ if __name__ == "__main__":
             if callback is not None:
                 callback.clear()
         if len(substitution_alphabet[1]) < 16**len(secrets):
+
             sys.stderr.write("There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:\n")
             sys.stderr.flush()
             import itertools
