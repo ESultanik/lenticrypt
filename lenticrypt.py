@@ -246,16 +246,12 @@ class Encrypter(object):
             max_length *= len(self.sorted_lengths) * 2
         count = 0
         buffers = [BufferedNibbleGramReader(e, self.sorted_lengths[0]) for e in self.to_encrypt]
-        at_byte_boundary = True
         while self.is_incomplete(buffers):
             # if the files are not the same length, encrypt to the length of to_encrypt1
             for length_num, length in enumerate(self.sorted_lengths):
                 if self.status_callback is not None:
                     count += 1
                     self.status_callback(count, max_length, "Encrypting")
-                if not at_byte_boundary and length > 1:
-                    # only allow multi-nibble chunks to start at byte boundaries!
-                    continue
                 ng = []
                 for i, b in enumerate(buffers):
                     n = b.peek_nibbles(length)
@@ -269,8 +265,6 @@ class Encrypter(object):
                     if self.status_callback is not None:
                         count += len(self.sorted_lengths) - (length_num + 1)
                 if success:
-                    if length == 1:
-                        at_byte_boundary = not at_byte_boundary
                     break
 
 class LengthChecksumEncrypter(Encrypter):
@@ -290,7 +284,7 @@ class LengthChecksumEncrypter(Encrypter):
             return max(self.buffer_lengths)
 
     def are_valid_nibbles(self, ng, length):
-        return not max(map(len,ng)) < length
+        return max(map(len,ng)) >= length
 
     def process_nibble(self, n, buffer_index, length):
         if n is None:
@@ -408,6 +402,13 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
                     if self.status_callback is not None:
                         count += len(self.sorted_lengths) - (length_num + 1)
                     break
+        # make sure that the dictionary contains all of the 1-nibble grams:
+        missing_grams = set(itertools.product(*[map(lambda j : (j,), range(16)) for i in range(len(self.to_encrypt))]))
+        for item in self.dictionary_items:
+            missing_grams.discard(item)
+        for missing in missing_grams:
+            self.dictionary_items.append(missing)
+            dictionary_hits[missing] = 1
         self.dictionary_items = sorted(self.dictionary_items, key=lambda pair : dictionary_hits[pair], reverse=True)
         self.dictionary = dict(map(reversed,enumerate(self.dictionary_items)))
         # reset the files back to their first bytes
@@ -572,9 +573,14 @@ def _decrypt_dictionary(stream, file_length, cert):
                 last_nibble = None
                 num_bytes += 1
         else:
-            assert(last_nibble is None)
-            for index in range(n,n+length,2):
-                yield chr((cert[index] << 4) | cert[index+1])
+            nibbles = cert[index:index+length]
+            if last_nibble is not None:
+                yield chr(last_nibble | nibbles[0])
+                num_bytes += 1
+                last_nibble = nibbles[-1] << 4
+                nibbles = nibbles[1:-1]
+            for index in range(0,len(nibbles),2):
+                yield chr((nibbles[index] << 4) | nibbles[index+1])
                 num_bytes += 1
 
 def decrypt(ciphertext, certificate, cert = None, file_length = None):
@@ -644,9 +650,16 @@ def decrypt(ciphertext, certificate, cert = None, file_length = None):
                     if file_length is not None and num_bytes >= file_length:
                         return
             else:
-                assert(last_nibble is None)
-                for index in range(n,n+length,2):
-                    yield chr((cert[index] << 4) | cert[index+1])
+                nibbles = cert[n:n+length]
+                if last_nibble is not None:
+                    yield chr(last_nibble | nibbles[0])
+                    num_bytes += 1
+                    last_nibble = nibbles[-1] << 4
+                    nibbles = nibbles[1:-1]
+                    if file_length is not None and num_bytes >= file_length:
+                        return
+                for index in range(0,len(nibbles),2):
+                    yield chr((nibbles[index] << 4) | nibbles[index+1])
                     num_bytes += 1
                     if file_length is not None and num_bytes >= file_length:
                         return
@@ -739,7 +752,7 @@ if __name__ == "__main__":
     elif args.decrypt:
         try:
             for byte in decrypt(args.decrypt[1], args.decrypt[0]):
-                args.outfile.write(chr(byte))
+                args.outfile.write(byte)
         except (KeyboardInterrupt, SystemExit):
             # die gracefully, without a stacktrace
             exit(1)
