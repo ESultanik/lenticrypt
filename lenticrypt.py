@@ -547,14 +547,24 @@ def _decrypt_dictionary(stream, file_length, cert):
             raise Exception("Unexpected end of file while decodeing dictionary!")
         length = ord(b)
         dictionary.append((index, length))
-        print index, length
-    exit(0)
-    for i in range(file_length):
+    last_nibble = None
+    num_bytes = 0
+    while num_bytes < file_length:
         dict_index = decode(stream)
         if dict_index >= len(dictionary):
             raise Exception("Invalid dictionary index %s!  Maximum valid index is %s." % (dict_index, len(dictionary)-1))
         index, length = dictionary[dict_index]
-        yield cert[index]
+        if length == 1:
+            if last_nibble is None:
+                last_nibble = cert[index] << 4
+            else:
+                yield last_nibble | cert[index]
+                last_nibble = None
+                num_bytes += 1
+        else:
+            for byte in cert[index:index+length]:
+                yield byte
+                num_bytes += 1
 
 def decrypt(ciphertext, certificate, cert = None, file_length = None):
     # the file format is specified in a comment at the top of the encrypt(...) function above.
