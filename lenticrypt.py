@@ -368,6 +368,7 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
 
     def build_dictionary(self):
         buffers = [BufferedNibbleGramReader(e, self.sorted_lengths[0]) for e in self.to_encrypt]
+        dictionary_hits = {}
         while self.is_incomplete(buffers):
             # if the files are not the same length, encrypt to the length of to_encrypt1
             for length_num, length in enumerate(self.sorted_lengths):
@@ -383,9 +384,13 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
                     for b in buffers:
                         b.get_nibbles(length)
                     if pair not in self.dictionary:
-                        self.dictionary[pair] = len(self.dictionary_items)
                         self.dictionary_items.append(pair)
+                        dictionary_hits[pair] = 1
+                    else:
+                        dictionary_hits[pair] += 1
                     break
+        self.dictionary_items = sorted(self.dictionary_items, key=lambda pair : dictionary_hits[pair], reverse=True)
+        self.dictionary = dict(reversed(list(enumerate(self.dictionary_items))))
         # reset the files back to their first bytes
         for e in self.to_encrypt:
             e.seek(0)
@@ -395,13 +400,15 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
             yield byte
         # add the dictionary:
         # First 8 bytes is the number of items in the dictionary:
-        for byte in struct.pack("<Q", len(self.dictionary)):
+        for byte in encode(len(self.dictionary)):
             yield byte
+        num_bytes = 0
         for pair in self.dictionary_items:
             index = self.substitution_alphabet[len(pair[0])][pair][0]
-            print "Index: " + str(index)
-            for byte in struct.pack("<Q", index):
+            for byte in encode(index):
+                num_bytes += 1
                 yield byte
+            yield len(pair[0])
 
 # block header, 8 bits:
 # MSB -> X X X X X X X X <- LSB
