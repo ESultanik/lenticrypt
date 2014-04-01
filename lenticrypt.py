@@ -367,11 +367,18 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
         return 3
 
     def build_dictionary(self):
+        max_length = self.get_max_length()
+        if self.status_callback is not None:
+            max_length *= len(self.sorted_lengths) * 2
+        count = 0
         buffers = [BufferedNibbleGramReader(e, self.sorted_lengths[0]) for e in self.to_encrypt]
         dictionary_hits = {}
         while self.is_incomplete(buffers):
             # if the files are not the same length, encrypt to the length of to_encrypt1
             for length_num, length in enumerate(self.sorted_lengths):
+                if self.status_callback is not None:
+                    count += 1
+                    self.status_callback(count, max_length, "Building Dictionary")
                 ng = []
                 for i, b in enumerate(buffers):
                     n = b.peek_nibbles(length)
@@ -383,32 +390,45 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
                     # consume the nibbles!
                     for b in buffers:
                         b.get_nibbles(length)
-                    if pair not in self.dictionary:
+                    if pair not in dictionary_hits:
                         self.dictionary_items.append(pair)
                         dictionary_hits[pair] = 1
                     else:
                         dictionary_hits[pair] += 1
+                    if self.status_callback is not None:
+                        count += len(self.sorted_lengths) - (length_num + 1)
                     break
         self.dictionary_items = sorted(self.dictionary_items, key=lambda pair : dictionary_hits[pair], reverse=True)
-        self.dictionary = dict(reversed(list(enumerate(self.dictionary_items))))
+        self.dictionary = dict(map(reversed,enumerate(self.dictionary_items)))
         # reset the files back to their first bytes
         for e in self.to_encrypt:
             e.seek(0)
+
+    def process_nibbles(self, ng, length, buffers):
+        pair = tuple(ng)
+        if pair in self.dictionary:
+            # consume the nibbles!
+            for b in buffers:
+                b.get_nibbles(length)
+            for byte in encode(self.dictionary[pair]):
+                yield chr(byte)
+        elif length == 1:
+            sys.stderr.write("Warning: there is insufficient entropy in the input secrets to encode the byte pair " + str(pair) + "! The resulting ciphertext will not decrypt to the correct plaintext.\n")
+            # consume these bytes
+            for b in buffers:
+                b.get_nibbles(length)
 
     def get_header(self):
         for byte in super(DictionaryEncrypter, self).get_header():
             yield byte
         # add the dictionary:
-        # First 8 bytes is the number of items in the dictionary:
         for byte in encode(len(self.dictionary)):
-            yield byte
-        num_bytes = 0
+            yield chr(byte)
         for pair in self.dictionary_items:
             index = self.substitution_alphabet[len(pair[0])][pair][0]
             for byte in encode(index):
-                num_bytes += 1
-                yield byte
-            yield len(pair[0])
+                yield chr(byte)
+            yield chr(len(pair[0]))
 
 # block header, 8 bits:
 # MSB -> X X X X X X X X <- LSB
@@ -516,6 +536,26 @@ class GzipIOWrapper(IOWrapper):
     def new_instance(self):
         return gzip.GzipFile(self.wrapped)
 
+def _decrypt_dictionary(stream, file_length, cert):
+    # read the dictionary index:
+    dictionary_length = decode(stream)
+    dictionary = []
+    for i in range(dictionary_length):
+        index = decode(stream)
+        b = stream.read(1)
+        if not b:
+            raise Exception("Unexpected end of file while decodeing dictionary!")
+        length = ord(b)
+        dictionary.append((index, length))
+        print index, length
+    exit(0)
+    for i in range(file_length):
+        dict_index = decode(stream)
+        if dict_index >= len(dictionary):
+            raise Exception("Invalid dictionary index %s!  Maximum valid index is %s." % (dict_index, len(dictionary)-1))
+        index, length = dictionary[dict_index]
+        yield cert[index]
+
 def decrypt(ciphertext, certificate, cert = None, file_length = None):
     # the file format is specified in a comment at the top of the encrypt(...) function above.
     if cert is None:
@@ -541,11 +581,15 @@ def decrypt(ciphertext, certificate, cert = None, file_length = None):
                 version = header & 0b01111111
                 sys.stderr.write("Found length header. File format version is " + str(version) + "\n")
                 if version > ENCRYPTION_VERSION:
-                    sys.stderr.write("Warning: This ciphertext appears to have been encrypted with a newer version of the cryptosystem (version " + str(version / 10.0) + ").\n")
+                    sys.stderr.write("Warning: This ciphertext appears to have been encrypted with a newer version of the cryptosystem (version " + str(version / 10.0) + ").\n")                    
                 # the next 8 encrypted bytes encode the length of the plaintext
                 raw_length = bytearray(decrypt(stream, None, cert = cert, file_length = 8))
                 file_length = struct.unpack("<Q", raw_length)[0]
                 sys.stderr.write("Plaintext file length is " + str(file_length) + " bytes\n")
+                if version == 3:
+                    for byte in _decrypt_dictionary(stream, file_length, cert):
+                        yield byte
+                    return
                 continue
             index_bytes = (header & 0b00000111) + 1
             if index_bytes not in index_type_map:
@@ -652,7 +696,8 @@ if __name__ == "__main__":
         try:
             with gzip.GzipFile(fileobj=args.outfile, mtime=1) as zipfile:
                 # mtime is set to 1 so that the output files are always identical if a random seed argument is provided
-                for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = not args.same_length, status_callback = callback):
+                #for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = not args.same_length, status_callback = callback):
+                for byte in DictionaryEncrypter(substitution_alphabet, map(lambda e : e[1], args.encrypt), status_callback = callback):
                     zipfile.write(byte)
         except (KeyboardInterrupt, SystemExit):
             # die gracefully, without a stacktrace
