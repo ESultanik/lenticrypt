@@ -100,7 +100,11 @@ def read_nibble_gram(byte_array, index, length):
         else:
             return (byte_array[offset] & 0b00001111,)
     else:
-        return tuple(byte_array[offset:offset+length/2])
+        b = []
+        for byte in byte_array[offset:offset+length/2]:
+            b.append((byte & 0b11110000) >> 4)
+            b.append(byte & 0b00001111)
+        return tuple(b)
 
 def find_common_nibble_grams(certificates, nibble_gram_lengths = [1, 2, 4, 8, 16], status_callback=None):
     all_nibbles = {} # maps a nibble value to a common index
@@ -242,12 +246,16 @@ class Encrypter(object):
             max_length *= len(self.sorted_lengths) * 2
         count = 0
         buffers = [BufferedNibbleGramReader(e, self.sorted_lengths[0]) for e in self.to_encrypt]
+        at_byte_boundary = True
         while self.is_incomplete(buffers):
             # if the files are not the same length, encrypt to the length of to_encrypt1
             for length_num, length in enumerate(self.sorted_lengths):
                 if self.status_callback is not None:
                     count += 1
                     self.status_callback(count, max_length, "Encrypting")
+                if not at_byte_boundary and length > 1:
+                    # only allow multi-nibble chunks to start at byte boundaries!
+                    continue
                 ng = []
                 for i, b in enumerate(buffers):
                     n = b.peek_nibbles(length)
@@ -261,6 +269,8 @@ class Encrypter(object):
                     if self.status_callback is not None:
                         count += len(self.sorted_lengths) - (length_num + 1)
                 if success:
+                    if length == 1:
+                        at_byte_boundary = not at_byte_boundary
                     break
 
 class LengthChecksumEncrypter(Encrypter):
@@ -558,12 +568,13 @@ def _decrypt_dictionary(stream, file_length, cert):
             if last_nibble is None:
                 last_nibble = cert[index] << 4
             else:
-                yield last_nibble | cert[index]
+                yield chr(last_nibble | cert[index])
                 last_nibble = None
                 num_bytes += 1
         else:
-            for byte in cert[index:index+length]:
-                yield byte
+            assert(last_nibble is None)
+            for index in range(n,n+length,2):
+                yield chr((cert[index] << 4) | cert[index+1])
                 num_bytes += 1
 
 def decrypt(ciphertext, certificate, cert = None, file_length = None):
@@ -610,15 +621,16 @@ def decrypt(ciphertext, certificate, cert = None, file_length = None):
                 break
             n = struct.unpack("<" + index_type_map[index_bytes], index)[0]
             if n >= len(cert):
+                sys.stderr.write("Warning: Decrypted invalid certificate index %s (maximum value is %s)\n" % (n, len(cert)-1))
                 if last_nibble is not None:
-                    yield last_nibble
+                    yield chr(last_nibble)
                     num_bytes += 1
                     if file_length is not None and num_bytes >= file_length:
                         return
                     last_nibble = None
                     length -= 1
                 for i in range(length):
-                    yield 0
+                    yield chr(0)
                     num_bytes += 1
                     if file_length is not None and num_bytes >= file_length:
                         return
@@ -626,14 +638,15 @@ def decrypt(ciphertext, certificate, cert = None, file_length = None):
                 if last_nibble is None:
                     last_nibble = cert[n] << 4
                 else:
-                    yield last_nibble | cert[n]
+                    yield chr(last_nibble | cert[n])
                     last_nibble = None
                     num_bytes += 1
                     if file_length is not None and num_bytes >= file_length:
                         return
             else:
-                for byte in cert[n:n+length]:
-                    yield byte
+                assert(last_nibble is None)
+                for index in range(n,n+length,2):
+                    yield chr((cert[index] << 4) | cert[index+1])
                     num_bytes += 1
                     if file_length is not None and num_bytes >= file_length:
                         return
@@ -651,7 +664,10 @@ if __name__ == "__main__":
     
     parser.add_argument("-f", "--force-encrypt", action="store_true", default=False, help="force encryption, even if the secrets have insufficient entropy to correctly encrypt the plaintexts")
     parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('w'), default=sys.stdout, help="the output file (default to stdout)")
-    parser.add_argument("-l", "--same-length", action="store_true", default=False, help="removes the header that is used to specify the length of the encrypted files.  The header solves the problem of having plaintexts of unequal length, so with this option enabled encryption might be lossy if the plaintexts are not the same length.  This option does slightly strengthen plausible deniability.")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--same-length", action="store_true", default=False, help="removes the header that is used to specify the length of the encrypted files.  The header solves the problem of having plaintexts of unequal length, so with this option enabled encryption might be lossy if the plaintexts are not the same length.  This option does slightly strengthen plausible deniability, but has the potential to produce very large ciphertexts.")
+    mode_group.add_argument("--length-checksum", action="store_true", default=False, help="encrypts the files with an encrypted file length checksum at slight expense to plausible deniability, however, it allows for correct decryption if the plaintexts are of different lengths.  This has the potential to produce very large ciphertexts.")
+    mode_group.add_argument("--dictionary", action="store_true", default=True, help="encrypts the files using both the file length checksum used with the `-c` option, but also with an index dictionary that can greatly reduce ciphertext size.  This is the default mode for encryption.")
     group.add_argument("-v", "--version", action="store_true", default=False, help="prints version information")
     parser.add_argument("-q", "--quiet", action="store_true", default=False, help="suppresses log messages")
     compression_group = parser.add_mutually_exclusive_group()
@@ -706,8 +722,13 @@ if __name__ == "__main__":
         try:
             with gzip.GzipFile(fileobj=args.outfile, mtime=1) as zipfile:
                 # mtime is set to 1 so that the output files are always identical if a random seed argument is provided
-                #for byte in encrypt(substitution_alphabet, map(lambda e : e[1], args.encrypt), add_length_checksum = not args.same_length, status_callback = callback):
-                for byte in DictionaryEncrypter(substitution_alphabet, map(lambda e : e[1], args.encrypt), status_callback = callback):
+                if args.same_length:
+                    encrypter = Encrypter
+                elif args.length_checksum:
+                    encrypter = LengthChecksumEncrypter
+                else:
+                    encrypter = DictionaryEncrypter
+                for byte in encrypter(substitution_alphabet, map(lambda e : e[1], args.encrypt), status_callback = callback):
                     zipfile.write(byte)
         except (KeyboardInterrupt, SystemExit):
             # die gracefully, without a stacktrace

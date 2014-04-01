@@ -24,7 +24,7 @@ class TestLenticrypt(unittest.TestCase):
         ciphertext = "".join(lenticrypt.Encrypter(self.substitution_alphabet, map(lambda s : StringIO.StringIO(s), self.plaintexts)))
         first_length = None
         for key, plaintext in zip(self.keys, self.plaintexts):
-            decrypted = "".join(map(chr,lenticrypt.decrypt(StringIO.StringIO(ciphertext), StringIO.StringIO(key))))
+            decrypted = "".join(lenticrypt.decrypt(StringIO.StringIO(ciphertext), StringIO.StringIO(key)))
             if first_length is None:
                 first_length = len(plaintext)
             else:
@@ -37,13 +37,13 @@ class TestLenticrypt(unittest.TestCase):
     def test_checksum_encryption(self):
         ciphertext = "".join(lenticrypt.LengthChecksumEncrypter(self.substitution_alphabet, map(lambda s : StringIO.StringIO(s), self.plaintexts)))
         for key, plaintext in zip(self.keys, self.plaintexts):
-            decrypted = "".join(map(chr,lenticrypt.decrypt(StringIO.StringIO(ciphertext), StringIO.StringIO(key))))
+            decrypted = "".join(lenticrypt.decrypt(StringIO.StringIO(ciphertext), StringIO.StringIO(key)))
             self.assertEqual(decrypted, plaintext)
 
     def test_dictionary_encryption(self):
         ciphertext = "".join(lenticrypt.DictionaryEncrypter(self.substitution_alphabet, map(lambda s : StringIO.StringIO(s), self.plaintexts)))
         for key, plaintext in zip(self.keys, self.plaintexts):
-            decrypted = "".join(map(chr,lenticrypt.decrypt(StringIO.StringIO(ciphertext), StringIO.StringIO(key))))
+            decrypted = "".join(lenticrypt.decrypt(StringIO.StringIO(ciphertext), StringIO.StringIO(key)))
             self.assertEqual(decrypted, plaintext)
 
     def test_encoding(self):
