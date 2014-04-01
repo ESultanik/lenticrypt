@@ -40,5 +40,19 @@ class TestLenticrypt(unittest.TestCase):
             decrypted = "".join(map(chr,lenticrypt.decrypt(StringIO.StringIO(ciphertext), StringIO.StringIO(key))))
             self.assertEqual(decrypted, plaintext)
 
+    def test_dictionary_encryption(self):
+        ciphertext = "".join(lenticrypt.DictionaryEncrypter(self.substitution_alphabet, map(lambda s : StringIO.StringIO(s), self.plaintexts)))
+        for key, plaintext in zip(self.keys, self.plaintexts):
+            decrypted = "".join(map(chr,lenticrypt.decrypt(StringIO.StringIO(ciphertext), StringIO.StringIO(key))))
+            self.assertEqual(decrypted, plaintext)
+
+    def test_encoding(self):
+        for i in range(5000):
+            n = random.randint(1, lenticrypt.MAX_ENCODE_VALUE-1)
+            self.assertEqual(n, lenticrypt.decode(lenticrypt.encode(n)))
+        # also make sure to test the extremal cases!
+        self.assertEqual(0, lenticrypt.decode(lenticrypt.encode(0)))
+        self.assertEqual(lenticrypt.MAX_ENCODE_VALUE, lenticrypt.decode(lenticrypt.encode(lenticrypt.MAX_ENCODE_VALUE)))
+
 if __name__ == '__main__':
     unittest.main()

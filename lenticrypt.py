@@ -237,11 +237,11 @@ class Encrypter(object):
     def __iter__(self):
         for byte in self.get_header():
             yield byte
-        buffers = [BufferedNibbleGramReader(e, self.sorted_lengths[0]) for e in self.to_encrypt]
         max_length = self.get_max_length()
         if self.status_callback is not None:
             max_length *= len(self.sorted_lengths) * 2
         count = 0
+        buffers = [BufferedNibbleGramReader(e, self.sorted_lengths[0]) for e in self.to_encrypt]
         while self.is_incomplete(buffers):
             # if the files are not the same length, encrypt to the length of to_encrypt1
             for length_num, length in enumerate(self.sorted_lengths):
@@ -296,13 +296,112 @@ class LengthChecksumEncrypter(Encrypter):
         for b in Encrypter(self.substitution_alphabet, lengths, status_callback=None):
             yield b
 
+encoding_steps = [(0b01111111, 0),
+                  (0b00111111, 0b10000000),
+                  (0b00011111, 0b11000000),
+                  (0b00001111, 0b11100000),
+                  (0b00000111, 0b11110000),
+                  (0b00000011, 0b11111000),
+                  (0b00000001, 0b11111100)]
+
+MAX_ENCODE_VALUE = 2**(8*(len(encoding_steps)-1)) + (encoding_steps[-1][0] << (8*(len(encoding_steps)-1))) - 1
+
+def encode(n):
+    orig_n = n
+    ret = bytearray([n & 0b11111111])
+    for test, mask in encoding_steps:
+        if n <= test:
+            ret[0] = ret[0] | mask
+            return ret
+        n >>= 8
+        ret = bytearray([n & 0b11111111]) + ret
+    raise Exception("Integer %s is too big to encode!  The biggest value supported is %s." % (orig_n, MAX_ENCODE_VALUE))
+
+def decode(byte_array):
+    if isinstance(byte_array, str) or isinstance(byte_array, bytearray):
+        byte_array = StringIO.StringIO(byte_array)
+    num_trailing_bytes = 0
+    byte = byte_array.read(1)
+    if not byte:
+        return None
+    byte = ord(byte)
+    # remove everything to the left of the first zero:
+    if not (byte & 0b10000000):
+        pass
+    elif not (byte & 0b01000000):
+        byte = byte & 0b00111111
+        num_trailing_bytes = 1
+    elif not (byte & 0b00100000):
+        byte = byte & 0b00011111
+        num_trailing_bytes = 2
+    elif not (byte & 0b00010000):
+        byte = byte & 0b00001111
+        num_trailing_bytes = 3
+    elif not (byte & 0b00001000):
+        byte = byte & 0b00000111
+        num_trailing_bytes = 4
+    elif not (byte & 0b00000100):
+        byte = byte & 0b00000011
+        num_trailing_bytes = 5
+    elif not (byte & 0b00000010):
+        byte = byte & 0b00000001
+        num_trailing_bytes = 6
+    n = byte
+    for i in range(num_trailing_bytes):
+        n <<= 8
+        byte = byte_array.read(1)
+        if not byte:
+            raise Exception("Error: expected another byte in the stream!")
+        n |= ord(byte)
+    return n
+
 # An encrypter for version 3 of the file spec.
 class DictionaryEncrypter(LengthChecksumEncrypter):
     def __init__(self, substitution_alphabet, to_encrypt, status_callback=None):
         super(DictionaryEncrypter, self).__init__(substitution_alphabet = substitution_alphabet, to_encrypt = to_encrypt, status_callback = status_callback)
+        self.dictionary = {}
+        self.dictionary_items = []
+        self.build_dictionary()
 
     def get_encryption_version(self):
         return 3
+
+    def build_dictionary(self):
+        buffers = [BufferedNibbleGramReader(e, self.sorted_lengths[0]) for e in self.to_encrypt]
+        while self.is_incomplete(buffers):
+            # if the files are not the same length, encrypt to the length of to_encrypt1
+            for length_num, length in enumerate(self.sorted_lengths):
+                ng = []
+                for i, b in enumerate(buffers):
+                    n = b.peek_nibbles(length)
+                    ng.append(self.process_nibble(n, i, length))
+                if not self.are_valid_nibbles(ng, length):
+                    continue
+                pair = tuple(ng)
+                if pair in self.substitution_alphabet[length]:
+                    # consume the nibbles!
+                    for b in buffers:
+                        b.get_nibbles(length)
+                    if pair not in self.dictionary:
+                        self.dictionary[pair] = len(self.dictionary_items)
+                        self.dictionary_items.append(pair)
+                    break
+        # reset the files back to their first bytes
+        for e in self.to_encrypt:
+            e.seek(0)
+
+    def get_header(self):
+        for byte in super(DictionaryEncrypter, self).get_header():
+            yield byte
+        # add the dictionary:
+        # First 8 bytes is the number of items in the dictionary:
+        for byte in struct.pack("<Q", len(self.dictionary)):
+            yield byte
+        for pair in self.dictionary_items:
+            index = self.substitution_alphabet[len(pair[0])][pair][0]
+            print "Index: " + str(index)
+            for byte in struct.pack("<Q", index):
+                yield byte
 
 # block header, 8 bits:
 # MSB -> X X X X X X X X <- LSB
@@ -435,7 +534,7 @@ def decrypt(ciphertext, certificate, cert = None, file_length = None):
                 version = header & 0b01111111
                 sys.stderr.write("Found length header. File format version is " + str(version) + "\n")
                 if version > ENCRYPTION_VERSION:
-                    sys.stderr.write("Warning: This ciphertext appears to have been encrypted with a newer version of the cryptosystem (version " + (version / 10.0) + ").\n")
+                    sys.stderr.write("Warning: This ciphertext appears to have been encrypted with a newer version of the cryptosystem (version " + str(version / 10.0) + ").\n")
                 # the next 8 encrypted bytes encode the length of the plaintext
                 raw_length = bytearray(decrypt(stream, None, cert = cert, file_length = 8))
                 file_length = struct.unpack("<Q", raw_length)[0]
