@@ -100,10 +100,20 @@ def read_nibble_gram(byte_array, index, length):
         else:
             return (byte_array[offset] & 0b00001111,)
     else:
-        b = []
+        if index % 2 != 0:
+            # we are ending on the first nibble of a byte
+            b = [read_nibble_gram(byte_array, index, 1)[0]]
+            offset += 1
+            new_length = length - 2
+        else:
+            b = []
+            new_length = length
         for byte in byte_array[offset:offset+length/2]:
             b.append((byte & 0b11110000) >> 4)
             b.append(byte & 0b00001111)
+        if index % 2 != 0:
+            # we are ending on the first nibble of a byte
+            b.append(read_nibble_gram(byte_array, index + length - 1, 1)[0])
         return tuple(b)
 
 def find_common_nibble_grams(certificates, nibble_gram_lengths = [1, 2, 4, 8, 16], status_callback=None):
@@ -123,7 +133,7 @@ def find_common_nibble_grams(certificates, nibble_gram_lengths = [1, 2, 4, 8, 16
     return all_nibbles
 
 class BufferedNibbleGramReader:
-    def __init__(self, stream, max_nibble_gram_length):
+    def __init__(self, stream, max_nibble_gram_length = None):
         self.stream = stream
         self.max_nibble_gram_length = max_nibble_gram_length
         self._buffer = []
@@ -143,7 +153,7 @@ class BufferedNibbleGramReader:
             return False
         elif len(self._buffer) >= length:
             return True
-        b = self.stream.read(length - len(self._buffer))
+        b = self.stream.read((length - len(self._buffer) + 1)/2)
         if not b:
             if len(self._buffer) == 0:
                 # we are done
@@ -654,15 +664,18 @@ def decrypt(ciphertext, certificate, cert = None, file_length = None):
                 if last_nibble is not None:
                     yield chr(last_nibble | nibbles[0])
                     num_bytes += 1
-                    last_nibble = nibbles[-1] << 4
-                    nibbles = nibbles[1:-1]
+                    last_nibble = None
+                    nibbles = nibbles[1:]
                     if file_length is not None and num_bytes >= file_length:
                         return
                 for index in range(0,len(nibbles),2):
-                    yield chr((nibbles[index] << 4) | nibbles[index+1])
-                    num_bytes += 1
-                    if file_length is not None and num_bytes >= file_length:
-                        return
+                    if index == len(nibbles) - 1:
+                        last_nibble = nibbles[index] << 4
+                    else:
+                        yield chr((nibbles[index] << 4) | nibbles[index+1])
+                        num_bytes += 1
+                        if file_length is not None and num_bytes >= file_length:
+                            return
 
 if __name__ == "__main__":
     import argparse
