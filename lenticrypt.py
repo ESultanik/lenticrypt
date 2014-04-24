@@ -540,7 +540,10 @@ class IOWrapper(object):
         self.wrapped = wrapped
         self._file = None
     def new_instance(self):
-        return open(self.wrapped)
+        if self.wrapped == '-':
+            return sys.stdin
+        else:
+            return open(self.wrapped)
     def __enter__(self):
         if isinstance(self.wrapped, StringIO.StringIO) or isinstance(self.wrapped, gzip.GzipFile) or isinstance(self.wrapped, file):
             return self.wrapped
@@ -555,7 +558,10 @@ class GzipIOWrapper(IOWrapper):
     def __init__(self, wrapped):
         super(GzipIOWrapper, self).__init__(wrapped)
     def new_instance(self):
-        return gzip.GzipFile(self.wrapped)
+        if self.wrapped == '-':
+            return gzip.GzipFile(fileobj = StringIO.StringIO(sys.stdin.read()))
+        else:
+            return gzip.GzipFile(self.wrapped)
 
 def _decrypt_dictionary(stream, file_length, cert):
     # read the dictionary index:
