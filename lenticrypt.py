@@ -1,6 +1,6 @@
 #!/usr/bin/env python2
 
-import os, sys, itertools, random, struct, StringIO, gzip
+import os, sys, itertools, random, struct, StringIO, gzip, array
 
 ENCRYPTION_VERSION = 3
 
@@ -102,11 +102,11 @@ def read_nibble_gram(byte_array, index, length):
     else:
         if index % 2 != 0:
             # we are ending on the first nibble of a byte
-            b = [read_nibble_gram(byte_array, index, 1)[0]]
+            b = array.array('B', [read_nibble_gram(byte_array, index, 1)[0]])
             offset += 1
             new_length = length - 2
         else:
-            b = []
+            b = array.array('B')
             new_length = length
         for byte in byte_array[offset:offset+length/2]:
             b.append((byte & 0b11110000) >> 4)
@@ -127,7 +127,7 @@ def find_common_nibble_grams(certificates, nibble_gram_lengths = [1, 2, 4, 8, 16
             if pair in nibbles:
                 nibbles[pair].append(index)
             else:
-                nibbles[pair] = [index]
+                nibbles[pair] = array.array('L',[index])
             if status_callback is not None:
                 status_callback(index, range_max, "Building Index for %s-nibble-grams" % nibble_gram_length)
     return all_nibbles
@@ -136,7 +136,7 @@ class BufferedNibbleGramReader:
     def __init__(self, stream, max_nibble_gram_length = None):
         self.stream = stream
         self.max_nibble_gram_length = max_nibble_gram_length
-        self._buffer = []
+        self._buffer = array.array('B')
         self.has_nibbles(1)
     def get_nibbles(self, length):
         r = self.peek_nibbles(length)
