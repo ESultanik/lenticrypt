@@ -116,7 +116,145 @@ def read_nibble_gram(byte_array, index, length):
             b.append(read_nibble_gram(byte_array, index + length - 1, 1)[0])
         return tuple(b)
 
+def read_nibble_gram_new(byte_array, index, length):
+    assert(is_power2(length))
+    offset = index/2
+    if length == 1:
+        # we are reading a single nibble, which is an edge case since in all other cases we are reading whole bytes
+        if index % 2 == 0:
+            return (byte_array[offset] & 0b11110000) >> 4
+        else:
+            return byte_array[offset] & 0b00001111
+    else:
+        if index % 2 != 0:
+            # we are ending on the first nibble of a byte
+            b = read_nibble_gram(byte_array, index, 1)
+            offset += 1
+            new_length = length - 2
+        else:
+            b = 0
+            new_length = length
+        for byte in byte_array[offset:offset+length/2]:
+            b <<= 8
+            b |= byte
+        if index % 2 != 0:
+            # we are ending on the first nibble of a byte
+            b <<= 4
+            b |= read_nibble_gram(byte_array, index + length - 1, 1)
+        return b
+
+def nibble_tuple_to_int(nibble_tuple, nibble_gram_length = None):
+    ret = 0
+    for nibble_set in nibble_tuple:
+        if nibble_gram_length is None:
+            nibble_gram_length = len(nibble_set)
+        if isinstance(nibble_set, int):
+            n = nibble_set
+        else:
+            n = 0
+            for nibble in nibble_set:
+                assert(nibble >= 0 and nibble <= 15)
+                n <<= 4
+                n |= nibble
+        assert len(bin(n)) - 2 <= 4 * nibble_gram_length
+        ret <<= 4 * nibble_gram_length
+        ret |= n
+    return ret
+
+def int_to_nibble_tuple(n, num_sets, nibble_gram_length):
+    sets = []
+    for i in range(num_sets):
+        s = []
+        for j in range(nibble_gram_length):
+            s.append(n & 0b1111)
+            n >>= 4
+        sets.append(tuple(reversed(s)))
+    return tuple(reversed(sets))
+
+class NibbleGramIndexOld:
+    def __init__(self, certificates, nibble_gram_lengths = [1, 2, 4, 8, 16], status_callback=None):
+        self.all_nibbles = {} # maps a nibble value to a common index
+        for nibble_gram_length in nibble_gram_lengths:
+            if nibble_gram_length < 3:
+                continue
+            nibbles = {}
+            self.all_nibbles[nibble_gram_length] = nibbles
+            range_max = min(map(len, certificates))*2 - nibble_gram_length + 1
+            for index in range(0,range_max):
+                pair = tuple(map(lambda c : read_nibble_gram(c, index, nibble_gram_length), certificates))
+                print pair
+                print nibble_tuple_to_int(pair, nibble_gram_length)
+                print int_to_nibble_tuple(nibble_tuple_to_int(pair, nibble_gram_length), len(certificates), nibble_gram_length)
+                #assert pair == int_to_nibble_tuple(nibble_tuple_to_int(pair, nibble_gram_length), len(certificates), nibble_gram_length)
+                #if pair in nibbles:
+                #    nibbles[pair].append(index)
+                #else:
+                #    nibbles[pair] = [index]
+                if status_callback is not None:
+                    status_callback(index, range_max, "Building Index for %s-nibble-grams" % nibble_gram_length)
+        exit(0)
+
+class NibbleGramIndexNode:
+    def __init__(self):
+        self.children = {}
+        self.indexes = []
+    def __getitem__(self, key):
+        next_tuple = tuple(map(lambda n : n[0], key))
+        if next_tuple not in self.children:
+            raise KeyError()
+        child = self.children[next_tuple]
+        if len(key[0]) == 1:
+            # this is the penultimate node for the requested nibble-gram length
+            return child.indexes
+        remainder = tuple(map(lambda n : n[1:], key))
+        return child[remainder]
+    def __setitem__(self, key, value):
+        next_tuple = tuple(map(lambda n : n[0], key))
+        if next_tuple not in self.children:
+            child = NibbleGramIndexNode()
+            self.children[next_tuple] = child
+        else:
+            child = self.children[next_tuple]
+        if len(key[0]) == 1:
+            # this is the penultimate node for the requested nibble-gram length
+            child.indexes = value
+        else:
+            remainder = tuple(map(lambda n : n[1:], key))
+            child[remainder] = value
+    def __contains__(self, key):
+        try:
+            self[key]
+            return True
+        except KeyError:
+            return False
+    def __len__(self):
+        s = 0
+        if len(self.indexes) > 0:
+            s = 1
+        return s + sum(map(len,self.children.values()))
+
+class NibbleGramIndex:
+    def __init__(self, certificates, nibble_gram_lengths = [1, 2, 4, 8, 16], status_callback=None):
+        self.root = NibbleGramIndexNode()
+        for nibble_gram_length in nibble_gram_lengths:
+            if nibble_gram_length < 3:
+                continue
+            range_max = min(map(len, certificates))*2 - nibble_gram_length + 1
+            for index in range(0,range_max):
+                pair = tuple(map(lambda c : read_nibble_gram(c, index, nibble_gram_length), certificates))
+                #print pair
+                #print nibble_tuple_to_int(pair, nibble_gram_length)
+                #print int_to_nibble_tuple(nibble_tuple_to_int(pair, nibble_gram_length), len(certificates), nibble_gram_length)
+                #assert pair == int_to_nibble_tuple(nibble_tuple_to_int(pair, nibble_gram_length), len(certificates), nibble_gram_length)
+                if pair in self.root:
+                    self.root[pair].append(index)
+                else:
+                    self.root[pair] = [index]
+                if status_callback is not None:
+                    status_callback(index, range_max, "Building Index for %s-nibble-grams" % nibble_gram_length)
+
 def find_common_nibble_grams(certificates, nibble_gram_lengths = [1, 2, 4, 8, 16], status_callback=None):
+    return NibbleGramIndex(certificates, nibble_gram_lengths, status_callback)
     all_nibbles = {} # maps a nibble value to a common index
     for nibble_gram_length in nibble_gram_lengths:
         nibbles = {}
@@ -124,6 +262,8 @@ def find_common_nibble_grams(certificates, nibble_gram_lengths = [1, 2, 4, 8, 16
         range_max = min(map(len, certificates))*2 - nibble_gram_length + 1
         for index in range(0,range_max):
             pair = tuple(map(lambda c : read_nibble_gram(c, index, nibble_gram_length), certificates))
+            print pair
+            exit(0)
             if pair in nibbles:
                 nibbles[pair].append(index)
             else:
