@@ -7,7 +7,7 @@ A simple cryptosystem that provides provable [plausibly deniable encryption](htt
 
 Unlike alternative plausibly deniable cryptosystems like the recently discontinued [TrueCrypt](http://en.wikipedia.org/wiki/TrueCrypt)—whose ciphertext size grows in proportion to the number of plaintexts (*i.e.*, hidden volumes) it encrypts—Lenticrypt's ciphertext size is proportional to the *largest* plaintext it encrypts.  This is because Lenticrypt shares bytes in the cyphertext between each of the plaintexts it encrypts; they are not stored in separate regions of the ciphertext. Therefore, there is no straightforward way to estimate the number of plaintexts that are "hidden" inside a single ciphertext.
 
-In fact, Lenticrypt has the theoretical property that, under reasonable assumptions, there is always a near 100% probability that there exists an key in the public domain that will decrypt a given ciphertext to *any* desired plaintext, even if that key is not known.
+In fact, Lenticrypt has the theoretical property that, under reasonable assumptions, there is always a near 100% probability that there exists an key in the public domain that will decrypt a given ciphertext to *any* desired plaintext, even if that key is not known.  Therefore, even if an incriminating plaintext is revealed, the author of the ciphertext can plausibly deny having created it because there is a non-zero probability that the plaintext was legitimately decrypted by random chance.
 
 More technical details on the cryptosystem as well as additional use-cases are described in [Issue 0x04](http://www.sultanik.com/pocorgtfo/pocorgtfo04.pdf) of [The International Journal of PoC||GTFO](http://www.sultanik.com/pocorgtfo/).
 
