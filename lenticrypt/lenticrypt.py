@@ -1,16 +1,28 @@
-#!/usr/bin/env python2
+import array
+import collections.abc
+import gzip
+import itertools
+import os
+import random
+import struct
+import sys
 
-import os, sys, itertools, random, struct, StringIO, gzip, array
+from io import BytesIO
+from typing import Any, BinaryIO, Callable, Dict, IO, Iterable, Iterator, MutableSequence, Optional, Sequence, Tuple, Union
 
 ENCRYPTION_VERSION = 3
 
-def get_terminal_size():
+StatusCallbackTypeHint = Optional[Callable[[int, int, str], Any]]
+
+
+def get_terminal_size() -> Tuple[int, int]:
     env = os.environ
+
     def ioctl_GWINSZ(fd):
         try:
-            import fcntl, termios, struct, os
-            cr = struct.unpack('hh', fcntl.ioctl(fd, termios.TIOCGWINSZ,
-        '1234'))
+            import fcntl
+            import termios
+            cr = struct.unpack('hh', fcntl.ioctl(fd, termios.TIOCGWINSZ, '1234'))
         except:
             return
         return cr
@@ -26,23 +38,28 @@ def get_terminal_size():
         cr = (env.get('LINES', 25), env.get('COLUMNS', 80))
     return int(cr[1]), int(cr[0])
 
+
 class StatusLine(object):
     def __init__(self, stream = sys.stderr):
         self.stream = stream
         self.clear()
+
     def clear(self):
         width, height = get_terminal_size()
         self.stream.write("\r" + " "*width + "\r")
+
     def write(self, text):
         self.stream.write(text)
 
+
 class ProgressBar(StatusLine):
-    def __init__(self, stream = sys.stderr, max_value = 100):
+    def __init__(self, stream = sys.stderr, max_value=100):
         super(ProgressBar, self).__init__(stream)
         self.max_value = max_value
         self.value = 0
         self._last_percent = -1
-    def update(self, value, status = ""):
+
+    def update(self, value, status=""):
         self.value = value
         percent = float(value) / float(self.max_value)
         if percent < 0:
@@ -60,7 +77,7 @@ class ProgressBar(StatusLine):
                 s = "%s %d%%" % (status, int(percent * 100.0 + 0.5))
             else:
                 s = "%d%%" % int(percent * 100.0 + 0.5)
-            status_start = (width - len(s)) / 2
+            status_start = (width - len(s)) // 2
             for i in range(width):
                 if i == status_start:
                     for j in range(len(s)):
@@ -75,24 +92,33 @@ class ProgressBar(StatusLine):
                     self.write("-")
             self.write("]")
 
+
 class ProgressBarCallback:
     def __init__(self):
         self.pb = None
-    def __call__(self, value, max_value, status = ""):
+
+    def __call__(self, value, max_value, status=""):
         if self.pb is None:
-            self.pb = ProgressBar(max_value = max_value)
+            self.pb = ProgressBar(max_value=max_value)
         self.pb.update(value, status)
+
     def clear(self):
         if self.pb is not None:
             self.pb.clear()
+
 
 def is_power2(num):
     """tests if a number is a power of two"""
     return num != 0 and ((num & (num - 1)) == 0)
 
-def read_nibble_gram(byte_array, index, length):
-    assert(is_power2(length))
-    offset = index/2
+
+NibbleGramTypeHint = Tuple[int, ...]
+
+
+def read_nibble_gram(byte_array: Sequence[int], index: int, length: int) -> NibbleGramTypeHint:
+    if not is_power2(length):
+        raise ValueError(f'length must be a power of two; received {length}')
+    offset = index // 2
     if length == 1:
         # we are reading a single nibble, which is an edge case since in all other cases we are reading whole bytes
         if index % 2 == 0:
@@ -108,7 +134,7 @@ def read_nibble_gram(byte_array, index, length):
         else:
             b = array.array('B')
             new_length = length
-        for byte in byte_array[offset:offset+length/2]:
+        for byte in byte_array[offset:offset+length//2]:
             b.append((byte & 0b11110000) >> 4)
             b.append(byte & 0b00001111)
         if index % 2 != 0:
@@ -116,21 +142,29 @@ def read_nibble_gram(byte_array, index, length):
             b.append(read_nibble_gram(byte_array, index + length - 1, 1)[0])
         return tuple(b)
 
-def find_common_nibble_grams(certificates, nibble_gram_lengths = [1, 2, 4, 8, 16], status_callback=None):
-    all_nibbles = {} # maps a nibble value to a common index
+
+NibbleGramsTypeHint = Dict[Tuple[NibbleGramTypeHint, ...], MutableSequence[int]]
+CommonNibbleGramsTypeHint = Dict[int, NibbleGramsTypeHint]
+
+
+def find_common_nibble_grams(certificates,
+                             nibble_gram_lengths=(1, 2, 4, 8, 16),
+                             status_callback: StatusCallbackTypeHint = None) -> CommonNibbleGramsTypeHint:
+    all_nibbles: CommonNibbleGramsTypeHint = {} # maps a nibble value to a common index
     for nibble_gram_length in nibble_gram_lengths:
-        nibbles = {}
+        nibbles: NibbleGramsTypeHint = {}
         all_nibbles[nibble_gram_length] = nibbles
-        range_max = min(map(len, certificates))*2 - nibble_gram_length + 1
-        for index in range(0,range_max):
-            pair = tuple(map(lambda c : read_nibble_gram(c, index, nibble_gram_length), certificates))
+        range_max = min(len(c) for c in certificates)*2 - nibble_gram_length + 1
+        for index in range(0, range_max):
+            pair = tuple(read_nibble_gram(c, index, nibble_gram_length) for c in certificates)
             if pair in nibbles:
                 nibbles[pair].append(index)
             else:
-                nibbles[pair] = array.array('L',[index])
+                nibbles[pair] = array.array('L', [index])
             if status_callback is not None:
                 status_callback(index, range_max, "Building Index for %s-nibble-grams" % nibble_gram_length)
     return all_nibbles
+
 
 class BufferedNibbleGramReader:
     def __init__(self, stream, max_nibble_gram_length = None):
@@ -138,39 +172,46 @@ class BufferedNibbleGramReader:
         self.max_nibble_gram_length = max_nibble_gram_length
         self._buffer = array.array('B')
         self.has_nibbles(1)
+
     def get_nibbles(self, length):
         r = self.peek_nibbles(length)
         if r is not None:
             del self._buffer[:length]
         return r
+
     def peek_nibbles(self, length):
         if not self.has_nibbles(length):
             return None
         else:
             return tuple(self._buffer[:length])
+
     def has_nibbles(self, length):
         if self._buffer is None:
             return False
         elif len(self._buffer) >= length:
             return True
-        b = self.stream.read((length - len(self._buffer) + 1)/2)
+        b = self.stream.read((length - len(self._buffer) + 1)//2)
         if not b:
             if len(self._buffer) == 0:
                 # we are done
                 self._buffer = None
             return False
         else:
-            for byte in map(ord,b):
+            for byte in b:
                 self._buffer.append((byte & 0b11110000) >> 4)
                 self._buffer.append(byte & 0b00001111)
             return True
+
     def eof(self):
         return self._buffer is None
+
     def __bool__(self):
         return not self.eof()
-    __nonzero__=__bool__
 
-def get_length(stream):
+    __nonzero__ = __bool__
+
+
+def get_length(stream: IO) -> int:
     """Gets the number of bytes in the stream."""
     old_position = stream.tell()
     stream.seek(0)
@@ -183,8 +224,13 @@ def get_length(stream):
     stream.seek(old_position)
     return length
 
+
 class Encrypter(object):
-    def __init__(self, substitution_alphabet, to_encrypt, status_callback=None):
+    def __init__(
+            self,
+            substitution_alphabet: CommonNibbleGramsTypeHint,
+            to_encrypt: Sequence[BinaryIO],
+            status_callback: StatusCallbackTypeHint = None):
         self.substitution_alphabet = substitution_alphabet
         self.to_encrypt = to_encrypt
         self.sorted_lengths = sorted(substitution_alphabet.keys(), reverse=True)
@@ -277,9 +323,10 @@ class Encrypter(object):
                 if success:
                     break
 
+
 class LengthChecksumEncrypter(Encrypter):
-    def __init__(self, substitution_alphabet, to_encrypt, status_callback=None):
-        super(LengthChecksumEncrypter, self).__init__(substitution_alphabet = substitution_alphabet, to_encrypt = to_encrypt, status_callback = status_callback)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
     def get_encryption_version(self):
         return 2
@@ -305,10 +352,11 @@ class LengthChecksumEncrypter(Encrypter):
 
     def get_header(self):
         block_header = 0b10000000 | self.get_encryption_version() # the magic length checksum bit and filetype version number
-        yield chr(block_header)
-        lengths = map(lambda l : StringIO.StringIO(struct.pack("<Q", l)), map(get_length, self.to_encrypt))
+        yield block_header
+        lengths = tuple(BytesIO(struct.pack("<Q", get_length(l))) for l in self.to_encrypt)
         for b in Encrypter(self.substitution_alphabet, lengths, status_callback=None):
             yield b
+
 
 encoding_steps = [(0b01111111, 0),
                   (0b00111111, 0b10000000),
@@ -320,7 +368,8 @@ encoding_steps = [(0b01111111, 0),
 
 MAX_ENCODE_VALUE = 2**(8*(len(encoding_steps)-1)) + (encoding_steps[-1][0] << (8*(len(encoding_steps)-1))) - 1
 
-def encode(n):
+
+def encode(n: int) -> bytearray:
     orig_n = n
     ret = bytearray([n & 0b11111111])
     for test, mask in encoding_steps:
@@ -331,14 +380,15 @@ def encode(n):
         ret = bytearray([n & 0b11111111]) + ret
     raise Exception("Integer %s is too big to encode!  The biggest value supported is %s." % (orig_n, MAX_ENCODE_VALUE))
 
-def decode(byte_array):
-    if isinstance(byte_array, str) or isinstance(byte_array, bytearray):
-        byte_array = StringIO.StringIO(byte_array)
+
+def decode(byte_array: Union[bytes, bytearray, BinaryIO]) -> Optional[int]:
+    if isinstance(byte_array, bytes) or isinstance(byte_array, bytearray):
+        byte_array = BytesIO(byte_array)
     num_trailing_bytes = 0
     byte = byte_array.read(1)
-    if not byte:
+    if len(byte) < 1:
         return None
-    byte = ord(byte)
+    byte = byte[0]
     # remove everything to the left of the first zero:
     if not (byte & 0b10000000):
         pass
@@ -360,19 +410,21 @@ def decode(byte_array):
     elif not (byte & 0b00000010):
         byte = byte & 0b00000001
         num_trailing_bytes = 6
-    n = byte
+    n: int = byte
     for i in range(num_trailing_bytes):
         n <<= 8
         byte = byte_array.read(1)
-        if not byte:
+        if len(byte) < 1:
             raise Exception("Error: expected another byte in the stream!")
-        n |= ord(byte)
+        byte = byte[0]
+        n |= byte
     return n
+
 
 # An encrypter for version 3 of the file spec.
 class DictionaryEncrypter(LengthChecksumEncrypter):
-    def __init__(self, substitution_alphabet, to_encrypt, status_callback=None):
-        super(DictionaryEncrypter, self).__init__(substitution_alphabet = substitution_alphabet, to_encrypt = to_encrypt, status_callback = status_callback)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.dictionary = {}
         self.dictionary_items = []
         self.build_dictionary()
@@ -419,8 +471,8 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
         for missing in missing_grams:
             self.dictionary_items.append(missing)
             dictionary_hits[missing] = 1
-        self.dictionary_items = sorted(self.dictionary_items, key=lambda pair : dictionary_hits[pair], reverse=True)
-        self.dictionary = dict(map(reversed,enumerate(self.dictionary_items)))
+        self.dictionary_items = sorted(self.dictionary_items, key=lambda p: dictionary_hits[p], reverse=True)
+        self.dictionary = {v: idx for idx, v in enumerate(self.dictionary_items)}
         # reset the files back to their first bytes
         for e in self.to_encrypt:
             e.seek(0)
@@ -432,7 +484,7 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
             for b in buffers:
                 b.get_nibbles(length)
             for byte in encode(self.dictionary[pair]):
-                yield chr(byte)
+                yield byte
         elif length == 1:
             sys.stderr.write("Warning: there is insufficient entropy in the input secrets to encode the byte pair " + str(pair) + "! The resulting ciphertext will not decrypt to the correct plaintext.\n")
             # consume these bytes
@@ -444,90 +496,97 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
             yield byte
         # add the dictionary:
         for byte in encode(len(self.dictionary)):
-            yield chr(byte)
+            yield byte
         for pair in self.dictionary_items:
             index = self.substitution_alphabet[len(pair[0])][pair][0]
             for byte in encode(index):
-                yield chr(byte)
-            yield chr(len(pair[0]))
+                yield byte
+            lp = len(pair[0])
+            assert lp <= 255
+            yield lp
+
 
 # block header, 8 bits:
 # MSB -> X X X X X X X X <- LSB
 #                 |-----| <-- index_bytes - 1 (since index_bytes is always greater than zero)
 #         |-------| <-- length - 1 (since length is always greater than zero)
 #       |-| <-- If 1, then the following 7 bits are a filetype version number and the following blocks are the encrypted 8 bytes encoding the length of the file
-def encrypt(substitution_alphabet, to_encrypt, add_length_checksum=False, status_callback=None):
-    if add_length_checksum:
-        block_header = 0b10000000 | ENCRYPTION_VERSION # the magic length checksum bit and filetype version number
-        yield chr(block_header)
-        lengths = map(lambda l : StringIO.StringIO(struct.pack("<Q", l)), map(get_length, to_encrypt))
-        for b in encrypt(substitution_alphabet, lengths, add_length_checksum=False, status_callback=None):
-            yield b
-    sorted_lengths = sorted(substitution_alphabet.keys(), reverse=True)
-    buffer_lengths = None
-    if status_callback is not None:
-        buffer_lengths = [get_length(b) for b in to_encrypt]
-    buffers = [BufferedNibbleGramReader(e, sorted_lengths[0]) for e in to_encrypt]
-    max_length = None
-    if add_length_checksum:
-        completion_test = lambda : sum(map(lambda b : not b.eof(), buffers))
-        if status_callback is not None:
-            max_length = max(buffer_lengths)
-    else:
-        completion_test = lambda : buffers[0]
-        if status_callback is not None:
-            max_length = buffer_lengths[0]
-    if status_callback is not None:
-        max_length *= len(sorted_lengths) * 2
-    count = 0
-    while completion_test():
-        # if the files are not the same length, encrypt to the length of to_encrypt1
-        for length_num, length in enumerate(sorted_lengths):
-            if status_callback is not None:
-                count += 1
-                status_callback(count, max_length, "Encrypting")
-            ng = []
-            for i, b in enumerate(buffers):
-                n = b.peek_nibbles(length)
-                if n is None and (i > 0 or add_length_checksum):
-                    # this will happen if this plaintext is shorter than the first plaintext; just pad its tail with zeros
-                    if add_length_checksum:
-                        # but if we are using a length checksum, we can make the padded bytes random:
-                        n = tuple([random.randint(0, 15) for j in range(length)])
-                    else:
-                        n = tuple([0]*length)
-                ng.append(n)
-            if (ng[0] is None and not add_length_checksum) or max(map(len,ng)) < length:
-                continue
-            pair = tuple(ng)
-            if pair in substitution_alphabet[length]:
-                # consume the nibbles!
-                for b in buffers:
-                    b.get_nibbles(length)
-                index = random.choice(substitution_alphabet[length][pair])
-                index_bytes = 8
-                index_type = "Q" # unsigned long long
-                if index < 256:
-                    index_bytes = 1
-                    index_type = "B" # unsigned char
-                elif index < 65536:
-                    index_bytes = 2
-                    index_type = "H" # unsigned short
-                elif index < 4294967296:
-                    index_bytes = 4
-                    index_type = "L" # unsigned long
-                assert(length <= 16) # if we want to support longer lengths, we will have to allocate more bits in the header, pearhaps using the currently used one
-                block_header = ((length - 1) << 3) | (index_bytes - 1)
-                for byte in struct.pack("<B" + index_type, block_header, index):
-                    yield byte
-                if status_callback is not None:
-                    count += len(sorted_lengths) - (length_num + 1)
-                break
-            elif length == 1:
-                sys.stderr.write("Warning: there is insufficient entropy in the input secrets to encode the byte pair " + str(pair) + "! The resulting ciphertext will not decrypt to the correct plaintext.\n")
-                # consume these bytes
-                for b in buffers:
-                    b.get_nibbles(length)
+# def encrypt(
+#         substitution_alphabet: CommonNibbleGramsTypeHint,
+#         to_encrypt: Union[Sequence[int], Sequence[BinaryIO]],
+#         add_length_checksum: bool = False,
+#         status_callback: StatusCallbackTypeHint = None):
+#     if add_length_checksum:
+#         block_header = 0b10000000 | ENCRYPTION_VERSION # the magic length checksum bit and filetype version number
+#         yield block_header
+#         lengths = tuple(get_length(BytesIO(struct.pack("<Q", l))) for l in to_encrypt)
+#         yield from encrypt(substitution_alphabet, lengths, add_length_checksum=False, status_callback=None)
+#     sorted_lengths = sorted(substitution_alphabet.keys(), reverse=True)
+#     buffer_lengths = None
+#     if status_callback is not None:
+#         buffer_lengths = tuple(get_length(b) for b in to_encrypt)
+#     buffers = [BufferedNibbleGramReader(e, sorted_lengths[0]) for e in to_encrypt]
+#     max_length = None
+#     if add_length_checksum:
+#         completion_test = lambda: sum(map(lambda b : not b.eof(), buffers))
+#         if status_callback is not None:
+#             max_length = max(buffer_lengths)
+#     else:
+#         completion_test = lambda: buffers[0]
+#         if status_callback is not None:
+#             max_length = buffer_lengths[0]
+#     if status_callback is not None:
+#         max_length *= len(sorted_lengths) * 2
+#     count = 0
+#     while completion_test():
+#         # if the files are not the same length, encrypt to the length of to_encrypt1
+#         for length_num, length in enumerate(sorted_lengths):
+#             if status_callback is not None:
+#                 count += 1
+#                 status_callback(count, max_length, "Encrypting")
+#             ng = []
+#             for i, b in enumerate(buffers):
+#                 n = b.peek_nibbles(length)
+#                 if n is None and (i > 0 or add_length_checksum):
+#                     # this will happen if this plaintext is shorter than the first plaintext; just pad its tail with zeros
+#                     if add_length_checksum:
+#                         # but if we are using a length checksum, we can make the padded bytes random:
+#                         n = tuple([random.randint(0, 15) for j in range(length)])
+#                     else:
+#                         n = tuple([0]*length)
+#                 ng.append(n)
+#             if (ng[0] is None and not add_length_checksum) or max(map(len,ng)) < length:
+#                 continue
+#             pair = tuple(ng)
+#             if pair in substitution_alphabet[length]:
+#                 # consume the nibbles!
+#                 for b in buffers:
+#                     b.get_nibbles(length)
+#                 index = random.choice(substitution_alphabet[length][pair])
+#                 index_bytes = 8
+#                 index_type = "Q" # unsigned long long
+#                 if index < 256:
+#                     index_bytes = 1
+#                     index_type = "B" # unsigned char
+#                 elif index < 65536:
+#                     index_bytes = 2
+#                     index_type = "H" # unsigned short
+#                 elif index < 4294967296:
+#                     index_bytes = 4
+#                     index_type = "L" # unsigned long
+#                 assert(length <= 16) # if we want to support longer lengths, we will have to allocate more bits in the header, pearhaps using the currently used one
+#                 block_header = ((length - 1) << 3) | (index_bytes - 1)
+#                 for byte in struct.pack("<B" + index_type, block_header, index):
+#                     yield byte
+#                 if status_callback is not None:
+#                     count += len(sorted_lengths) - (length_num + 1)
+#                 break
+#             elif length == 1:
+#                 sys.stderr.write("Warning: there is insufficient entropy in the input secrets to encode the byte pair " + str(pair) + "! The resulting ciphertext will not decrypt to the correct plaintext.\n")
+#                 # consume these bytes
+#                 for b in buffers:
+#                     b.get_nibbles(length)
+
 
 index_type_map = {
     1 : 'B',
@@ -535,33 +594,43 @@ index_type_map = {
     4 : 'L',
     8 : 'Q'}
 
+
 class IOWrapper(object):
-    def __init__(self, wrapped):
+    def __init__(self, wrapped: Union[str, BinaryIO]):
         self.wrapped = wrapped
         self._file = None
+
     def new_instance(self):
         if self.wrapped == '-':
             return sys.stdin
+        elif isinstance(self.wrapped, collections.abc.Iterable):
+            if not isinstance(self.wrapped, bytes) and not isinstance(self.wrapped, bytearray):
+                return BytesIO(bytes([b for b in self.wrapped]))
+            else:
+                return BytesIO(self.wrapped)
         else:
             return open(self.wrapped)
+
     def __enter__(self):
-        if isinstance(self.wrapped, StringIO.StringIO) or isinstance(self.wrapped, gzip.GzipFile) or isinstance(self.wrapped, file):
+        if isinstance(self.wrapped, BytesIO) or isinstance(self.wrapped, gzip.GzipFile):
             return self.wrapped
         else:
             self._file = self.new_instance()
             return self._file.__enter__()
+
     def __exit__(self, type, value, tb):
         if self._file is not None:
             self._file.__exit__(type, value, tb)
+            self._file = None
+
 
 class GzipIOWrapper(IOWrapper):
-    def __init__(self, wrapped):
-        super(GzipIOWrapper, self).__init__(wrapped)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
     def new_instance(self):
-        if self.wrapped == '-':
-            return gzip.GzipFile(fileobj = StringIO.StringIO(sys.stdin.read()))
-        else:
-            return gzip.GzipFile(self.wrapped)
+        return gzip.GzipFile(fileobj=super().new_instance())
+
 
 def _decrypt_dictionary(stream, file_length, cert):
     # read the dictionary index:
@@ -570,9 +639,9 @@ def _decrypt_dictionary(stream, file_length, cert):
     for i in range(dictionary_length):
         index = decode(stream)
         b = stream.read(1)
-        if not b:
+        if len(b) < 1:
             raise Exception("Unexpected end of file while decodeing dictionary!")
-        length = ord(b)
+        length = b[0]
         dictionary.append((index, length))
     last_nibble = None
     num_bytes = 0
@@ -585,21 +654,22 @@ def _decrypt_dictionary(stream, file_length, cert):
             if last_nibble is None:
                 last_nibble = cert[index] << 4
             else:
-                yield chr(last_nibble | cert[index])
+                yield last_nibble | cert[index]
                 last_nibble = None
                 num_bytes += 1
         else:
             nibbles = cert[index:index+length]
             if last_nibble is not None:
-                yield chr(last_nibble | nibbles[0])
+                yield last_nibble | nibbles[0]
                 num_bytes += 1
                 last_nibble = nibbles[-1] << 4
                 nibbles = nibbles[1:-1]
             for index in range(0,len(nibbles),2):
-                yield chr((nibbles[index] << 4) | nibbles[index+1])
+                yield (nibbles[index] << 4) | nibbles[index+1]
                 num_bytes += 1
 
-def decrypt(ciphertext, certificate, cert = None, file_length = None):
+
+def decrypt(ciphertext: Iterable[int], certificate, cert=None, file_length=None) -> Iterator[int]:
     # the file format is specified in a comment at the top of the encrypt(...) function above.
     if cert is None:
         cert = []
@@ -608,10 +678,10 @@ def decrypt(ciphertext, certificate, cert = None, file_length = None):
                 b = stream.read(1)
                 if not b:
                     break
-                b = ord(b[0]) & 0b11111111
+                b = b[0] & 0b11111111
                 cert.append((b & 0b11110000) >> 4)
                 cert.append(b & 0b00001111)
-    with GzipIOWrapper(ciphertext) as stream:
+    with IOWrapper(ciphertext) as stream:
         last_nibble = None
         num_bytes = 0
         while True:
@@ -626,7 +696,7 @@ def decrypt(ciphertext, certificate, cert = None, file_length = None):
                 if version > ENCRYPTION_VERSION:
                     sys.stderr.write("Warning: This ciphertext appears to have been encrypted with a newer version of the cryptosystem (version " + str(version / 10.0) + ").\n")                    
                 # the next 8 encrypted bytes encode the length of the plaintext
-                raw_length = bytearray(decrypt(stream, None, cert = cert, file_length = 8))
+                raw_length = bytearray(decrypt(stream, None, cert=cert, file_length=8))
                 file_length = struct.unpack("<Q", raw_length)[0]
                 sys.stderr.write("Plaintext file length is " + str(file_length) + " bytes\n")
                 if version == 3:
@@ -645,14 +715,14 @@ def decrypt(ciphertext, certificate, cert = None, file_length = None):
             if n >= len(cert):
                 sys.stderr.write("Warning: Decrypted invalid certificate index %s (maximum value is %s)\n" % (n, len(cert)-1))
                 if last_nibble is not None:
-                    yield chr(last_nibble)
+                    yield last_nibble
                     num_bytes += 1
                     if file_length is not None and num_bytes >= file_length:
                         return
                     last_nibble = None
                     length -= 1
                 for i in range(length):
-                    yield chr(0)
+                    yield 0
                     num_bytes += 1
                     if file_length is not None and num_bytes >= file_length:
                         return
@@ -660,7 +730,7 @@ def decrypt(ciphertext, certificate, cert = None, file_length = None):
                 if last_nibble is None:
                     last_nibble = cert[n] << 4
                 else:
-                    yield chr(last_nibble | cert[n])
+                    yield last_nibble | cert[n]
                     last_nibble = None
                     num_bytes += 1
                     if file_length is not None and num_bytes >= file_length:
@@ -668,135 +738,17 @@ def decrypt(ciphertext, certificate, cert = None, file_length = None):
             else:
                 nibbles = cert[n:n+length]
                 if last_nibble is not None:
-                    yield chr(last_nibble | nibbles[0])
+                    yield last_nibble | nibbles[0]
                     num_bytes += 1
                     last_nibble = None
                     nibbles = nibbles[1:]
                     if file_length is not None and num_bytes >= file_length:
                         return
-                for index in range(0,len(nibbles),2):
+                for index in range(0, len(nibbles), 2):
                     if index == len(nibbles) - 1:
                         last_nibble = nibbles[index] << 4
                     else:
-                        yield chr((nibbles[index] << 4) | nibbles[index+1])
+                        yield (nibbles[index] << 4) | nibbles[index+1]
                         num_bytes += 1
                         if file_length is not None and num_bytes >= file_length:
                             return
-
-if __name__ == "__main__":
-    import argparse
-    
-    copyright_message = "Copyright (C) 2012--2014, Evan A. Sultanik, Ph.D.  \nhttp://www.sultanik.com/\n"
-
-    parser = argparse.ArgumentParser(description="A simple cryptosystem with provable plausible deniability.  " + copyright_message, prog="lenticrypt")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("-e", "--encrypt", action="append", nargs=2, type=argparse.FileType('r'), metavar=('secret', 'plaintext'), help="encrypts the given plaintext file(s) into a single ciphertext using the given secret file(s).  Additional secret/plaintext pairs can be specified by providing the `-e` option multiple times.  For example, `-e secret1 plaintext1 -e secret2 plaintext2 -e secret3 plaintext3 ...`.  If the `-l` argument is used, any plaintext that is longer than the first one provided will be truncated.  Any plaintext that is shorter than the first one provided will be tail-padded with zeros.")
-    group.add_argument("-d", "--decrypt", nargs=2, type=str, metavar=('secret', 'ciphertext'), help="decrypts the ciphertext file using the given secret file")
-    group.add_argument("-t", "--test", type=argparse.FileType('r'), nargs="+", metavar=('secret'), help="tests whether a given set of secrets have sufficient entropy to encrypt an equal number of plaintexts.  The exit code of the program is zero on success.  On failure, the missing byte combinations are printed to stdout.")
-    
-    parser.add_argument("-f", "--force-encrypt", action="store_true", default=False, help="force encryption, even if the secrets have insufficient entropy to correctly encrypt the plaintexts")
-    parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('w'), default=sys.stdout, help="the output file (default to stdout)")
-    mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument("--same-length", action="store_true", default=False, help="removes the header that is used to specify the length of the encrypted files.  The header solves the problem of having plaintexts of unequal length, so with this option enabled encryption might be lossy if the plaintexts are not the same length.  This option does slightly strengthen plausible deniability, but has the potential to produce very large ciphertexts.")
-    mode_group.add_argument("--length-checksum", action="store_true", default=False, help="encrypts the files with an encrypted file length checksum at slight expense to plausible deniability, however, it allows for correct decryption if the plaintexts are of different lengths.  This has the potential to produce very large ciphertexts.")
-    mode_group.add_argument("--dictionary", action="store_true", default=True, help="encrypts the files using both the file length checksum used with the `-c` option, but also with an index dictionary that can greatly reduce ciphertext size.  This is the default mode for encryption.")
-    group.add_argument("-v", "--version", action="store_true", default=False, help="prints version information")
-    parser.add_argument("-q", "--quiet", action="store_true", default=False, help="suppresses log messages")
-    compression_group = parser.add_mutually_exclusive_group()
-    compression_group.add_argument("-1","--fast", action="store_true", default=False)
-    compression_group.add_argument("-2", dest="two", action="store_true", default=False)
-    compression_group.add_argument("-3", dest="three", action="store_true", default=False)
-    compression_group.add_argument("-4", dest="four", action="store_true", default=True)
-    compression_group.add_argument("-5","--best", action="store_true", default=False, help="These options change the compression level used, with the -1 option being the fastest, with less compression, and the -5 option being the slowest, with best compression.  CPU and memory usage will increase exponentially as the compression level increases.  The default compression level is -4.")
-    parser.add_argument("-s", "--seed", type=int, default=None, help="seeds the random number generator to the given value")
-
-    args = parser.parse_args()
-    
-    if args.seed is not None:
-        random.seed(args.seed)
-
-    if args.version:
-        sys.stdout.write("Cryptosystem Version: " + str(ENCRYPTION_VERSION / 10.0) + "\n" + copyright_message + "\n")
-    elif args.encrypt:
-        secrets = map(lambda s : bytearray(s[0].read()), args.encrypt)
-        nibble_gram_lengths = [1, 2, 4, 8, 16]
-        if args.fast:
-            nibble_gram_lengths = nibble_gram_lengths[:1]
-        elif args.two:
-            nibble_gram_lengths = nibble_gram_lengths[:2]
-        elif args.three:
-            nibble_gram_lengths = nibble_gram_lengths[:3]
-        elif args.four:
-            nibble_gram_lengths = nibble_gram_lengths[:4]
-        callback = None
-        if not args.quiet:
-            callback = ProgressBarCallback()
-        try:
-            substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = nibble_gram_lengths, status_callback = callback)
-        except (KeyboardInterrupt, SystemExit):
-            # die gracefully, without a stacktrace
-            exit(1)
-        finally:
-            if callback is not None:
-                callback.clear()
-        if len(substitution_alphabet[1]) < 16**len(secrets):
-            err_msg = "there is not sufficient coverage between the certificates to encrypt all possible bytes!\n"
-            if args.force_encrypt:
-                sys.stderr.write("Warning: " + err_msg)
-            else:
-                sys.stderr.write("Error: " + err_msg + "To supress this error, re-run with the `-f` option.\n")
-                exit(1)
-        # let the secret files be garbage collected, if needed:
-        secrets = None
-        callback = None
-        if not args.quiet:
-            callback = ProgressBarCallback()
-        try:
-            with gzip.GzipFile(fileobj=args.outfile, mtime=1) as zipfile:
-                # mtime is set to 1 so that the output files are always identical if a random seed argument is provided
-                if args.same_length:
-                    encrypter = Encrypter
-                elif args.length_checksum:
-                    encrypter = LengthChecksumEncrypter
-                else:
-                    encrypter = DictionaryEncrypter
-                for byte in encrypter(substitution_alphabet, map(lambda e : e[1], args.encrypt), status_callback = callback):
-                    zipfile.write(byte)
-        except (KeyboardInterrupt, SystemExit):
-            # die gracefully, without a stacktrace
-            exit(1)
-        finally:
-            if callback is not None:
-                callback.clear()
-    elif args.decrypt:
-        try:
-            for byte in decrypt(args.decrypt[1], args.decrypt[0]):
-                args.outfile.write(byte)
-        except (KeyboardInterrupt, SystemExit):
-            # die gracefully, without a stacktrace
-            exit(1)
-    elif args.test:
-        secrets = map(lambda s : bytearray(s.read()), args.test)
-        callback = None
-        if not args.quiet:
-            callback = ProgressBarCallback()
-        try:
-            substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths = [1], status_callback = callback)
-        except (KeyboardInterrupt, SystemExit):
-            # die gracefully, without a stacktrace
-            exit(1)
-        finally:
-            if callback is not None:
-                callback.clear()
-        if len(substitution_alphabet[1]) < 16**len(secrets):
-
-            sys.stderr.write("There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:\n")
-            sys.stderr.flush()
-            import itertools
-            for combination in itertools.product(*[range(16) for i in range(len(secrets))]):
-                if tuple(map(lambda c : (c,), combination)) not in substitution_alphabet[1]:
-                    sys.stdout.write(str(tuple(map(chr, combination))) + "\n")
-            exit(1)
-        else:
-            sys.stderr.write("This set of secrets looks good!\n")
-            exit(0)
