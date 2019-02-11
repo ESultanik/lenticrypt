@@ -2,7 +2,6 @@ import array
 import collections.abc
 import gzip
 import itertools
-import os
 import random
 import struct
 import sys
@@ -13,98 +12,6 @@ from typing import Any, BinaryIO, Callable, Dict, IO, Iterable, Iterator, Mutabl
 ENCRYPTION_VERSION = 3
 
 StatusCallbackTypeHint = Optional[Callable[[int, int, str], Any]]
-
-
-def get_terminal_size() -> Tuple[int, int]:
-    env = os.environ
-
-    def ioctl_GWINSZ(fd):
-        try:
-            import fcntl
-            import termios
-            cr = struct.unpack('hh', fcntl.ioctl(fd, termios.TIOCGWINSZ, '1234'))
-        except:
-            return
-        return cr
-    cr = ioctl_GWINSZ(0) or ioctl_GWINSZ(1) or ioctl_GWINSZ(2)
-    if not cr:
-        try:
-            fd = os.open(os.ctermid(), os.O_RDONLY)
-            cr = ioctl_GWINSZ(fd)
-            os.close(fd)
-        except:
-            pass
-    if not cr:
-        cr = (env.get('LINES', 25), env.get('COLUMNS', 80))
-    return int(cr[1]), int(cr[0])
-
-
-class StatusLine(object):
-    def __init__(self, stream = sys.stderr):
-        self.stream = stream
-        self.clear()
-
-    def clear(self):
-        width, height = get_terminal_size()
-        self.stream.write("\r" + " "*width + "\r")
-
-    def write(self, text):
-        self.stream.write(text)
-
-
-class ProgressBar(StatusLine):
-    def __init__(self, stream = sys.stderr, max_value=100):
-        super(ProgressBar, self).__init__(stream)
-        self.max_value = max_value
-        self.value = 0
-        self._last_percent = -1
-
-    def update(self, value, status=""):
-        self.value = value
-        percent = float(value) / float(self.max_value)
-        if percent < 0:
-            percent = 0
-        elif percent > 1.0:
-            percent = 1.0
-        if int(percent * 100.0 + 0.5) != self._last_percent:
-            self._last_percent = int(percent * 100.0 + 0.5)
-            width, height = get_terminal_size()
-            width -= 2
-            pixels = int(float(width) * percent + 0.5)
-            self.clear()
-            self.write("[")
-            if len(status) > 0:
-                s = "%s %d%%" % (status, int(percent * 100.0 + 0.5))
-            else:
-                s = "%d%%" % int(percent * 100.0 + 0.5)
-            status_start = (width - len(s)) // 2
-            for i in range(width):
-                if i == status_start:
-                    for j in range(len(s)):
-                        if s[j] == ' ' and j + i < pixels:
-                            s = s[:j] + '=' + s[j+1:]
-                    self.write(s)
-                elif i > status_start and i < status_start + len(s):
-                    pass
-                elif i < pixels:
-                    self.write("=")
-                else:
-                    self.write("-")
-            self.write("]")
-
-
-class ProgressBarCallback:
-    def __init__(self):
-        self.pb = None
-
-    def __call__(self, value, max_value, status=""):
-        if self.pb is None:
-            self.pb = ProgressBar(max_value=max_value)
-        self.pb.update(value, status)
-
-    def clear(self):
-        if self.pb is not None:
-            self.pb.clear()
 
 
 def is_power2(num):

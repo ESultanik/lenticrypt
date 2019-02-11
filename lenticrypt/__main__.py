@@ -1,9 +1,11 @@
 import argparse
+import gzip
 import itertools
 import random
 import sys
 
-from .lenticrypt import ENCRYPTION_VERSION
+from .lenticrypt import ENCRYPTION_VERSION, find_common_nibble_grams, Encrypter, LengthChecksumEncrypter, DictionaryEncrypter
+from .progress import ProgressBarCallback
 
 
 def main(argv=None):
@@ -21,12 +23,12 @@ def main(argv=None):
                        help="encrypts the given plaintext file(s) into a single ciphertext using the given secret file(s).  Additional secret/plaintext pairs can be specified by providing the `-e` option multiple times.  For example, `-e secret1 plaintext1 -e secret2 plaintext2 -e secret3 plaintext3 ...`.  If the `-l` argument is used, any plaintext that is longer than the first one provided will be truncated.  Any plaintext that is shorter than the first one provided will be tail-padded with zeros.")
     group.add_argument("-d", "--decrypt", nargs=2, type=str, metavar=('secret', 'ciphertext'),
                        help="decrypts the ciphertext file using the given secret file")
-    group.add_argument("-t", "--test", type=argparse.FileType('r'), nargs="+", metavar=('secret'),
+    group.add_argument("-t", "--test", type=argparse.FileType('rb'), nargs="+", metavar=('secret'),
                        help="tests whether a given set of secrets have sufficient entropy to encrypt an equal number of plaintexts.  The exit code of the program is zero on success.  On failure, the missing byte combinations are printed to stdout.")
 
     parser.add_argument("-f", "--force-encrypt", action="store_true", default=False,
                         help="force encryption, even if the secrets have insufficient entropy to correctly encrypt the plaintexts")
-    parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('w'), default=sys.stdout,
+    parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('wb'), default=sys.stdout,
                         help="the output file (default to stdout)")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--same-length", action="store_true", default=False,
@@ -47,13 +49,13 @@ def main(argv=None):
     parser.add_argument("-s", "--seed", type=int, default=None,
                         help="seeds the random number generator to the given value")
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(argv[1:])
 
     if args.seed is not None:
         random.seed(args.seed)
 
     if args.version:
-        sys.stdout.write("Cryptosystem Version: " + str(ENCRYPTION_VERSION / 10.0) + "\n" + copyright_message + "\n")
+        sys.stdout.write(f"Cryptosystem Version: {ENCRYPTION_VERSION / 10.0}\n{copyright_message}\n")
     elif args.encrypt:
         secrets = map(lambda s: bytearray(s[0].read()), args.encrypt)
         nibble_gram_lengths = [1, 2, 4, 8, 16]
@@ -80,9 +82,9 @@ def main(argv=None):
         if len(substitution_alphabet[1]) < 16 ** len(secrets):
             err_msg = "there is not sufficient coverage between the certificates to encrypt all possible bytes!\n"
             if args.force_encrypt:
-                sys.stderr.write("Warning: " + err_msg)
+                sys.stderr.write(f"Warning: {err_msg}")
             else:
-                sys.stderr.write("Error: " + err_msg + "To supress this error, re-run with the `-f` option.\n")
+                sys.stderr.write(f"Error: {err_msg}To supress this error, re-run with the `-f` option.\n")
                 exit(1)
         # let the secret files be garbage collected, if needed:
         secrets = None
@@ -115,7 +117,7 @@ def main(argv=None):
             # die gracefully, without a stacktrace
             exit(1)
     elif args.test:
-        secrets = map(lambda s: bytearray(s.read()), args.test)
+        secrets = tuple(s.read() for s in args.test)
         callback = None
         if not args.quiet:
             callback = ProgressBarCallback()
@@ -128,12 +130,11 @@ def main(argv=None):
             if callback is not None:
                 callback.clear()
         if len(substitution_alphabet[1]) < 16 ** len(secrets):
-
             sys.stderr.write(
                 "There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:\n")
             sys.stderr.flush()
-            for combination in itertools.product(*[range(16) for i in range(len(secrets))]):
-                if tuple(map(lambda c: (c,), combination)) not in substitution_alphabet[1]:
+            for combination in itertools.product(*[range(16) for _ in range(len(secrets))]):
+                if tuple((c,) for c in combination) not in substitution_alphabet[1]:
                     sys.stdout.write(str(tuple(map(chr, combination))) + "\n")
             exit(1)
         else:
