@@ -57,7 +57,7 @@ def main(argv=None):
     if args.version:
         sys.stdout.write(f"Cryptosystem Version: {ENCRYPTION_VERSION / 10.0}\n{copyright_message}\n")
     elif args.encrypt:
-        secrets = map(lambda s: bytearray(s[0].read()), args.encrypt)
+        secrets = tuple(bytearray(s[0].read()) for s in args.encrypt)
         nibble_gram_lengths = [1, 2, 4, 8, 16]
         if args.fast:
             nibble_gram_lengths = nibble_gram_lengths[:1]
@@ -100,9 +100,8 @@ def main(argv=None):
                     encrypter = LengthChecksumEncrypter
                 else:
                     encrypter = DictionaryEncrypter
-                for byte in encrypter(substitution_alphabet, map(lambda e: e[1], args.encrypt),
-                                      status_callback=callback):
-                    zipfile.write(byte)
+                zipfile.write(bytes(encrypter(substitution_alphabet, tuple(e[1] for e in args.encrypt),
+                                      status_callback=callback)))
         except (KeyboardInterrupt, SystemExit):
             # die gracefully, without a stacktrace
             exit(1)
