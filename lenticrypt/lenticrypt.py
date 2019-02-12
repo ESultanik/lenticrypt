@@ -6,8 +6,9 @@ import random
 import struct
 import sys
 
+from collections import defaultdict
 from io import BytesIO
-from typing import Any, BinaryIO, Callable, Dict, IO, Iterable, Iterator, MutableSequence, Optional, Sequence, Tuple, Union
+from typing import Any, BinaryIO, Callable, Dict, Generator, IO, Iterable, Optional, Sequence, Sized, Tuple, Union
 
 ENCRYPTION_VERSION = 3
 
@@ -19,80 +20,87 @@ def is_power2(num):
     return num != 0 and ((num & (num - 1)) == 0)
 
 
-NibbleGramTypeHint = Tuple[int, ...]
+def read_nibbles(byte_array: Sequence[int]) -> Generator[int, None, None]:
+    for b in byte_array:
+        yield (b & 0b11110000) >> 4
+        yield b & 0b00001111
 
 
-def read_nibble_gram(byte_array: Sequence[int], index: int, length: int) -> NibbleGramTypeHint:
+NibbleGramTypeHint = Generator[bytes, None, None]#Tuple[int, ...]
+
+
+def read_nibble_grams(byte_array: Sequence[int], length: int = 1) -> NibbleGramTypeHint:
     if not is_power2(length):
         raise ValueError(f'length must be a power of two; received {length}')
+
+    return (bytes(ng) for ng in zip(*(itertools.islice(nibbles, i, None) for i, nibbles in enumerate(itertools.tee(read_nibbles(byte_array), length)))))
+
+
+def old():
     offset = index // 2
     if length == 1:
         # we are reading a single nibble, which is an edge case since in all other cases we are reading whole bytes
         if index % 2 == 0:
-            return ((byte_array[offset] & 0b11110000) >> 4,)
+            yield (byte_array[offset] & 0b11110000) >> 4
         else:
-            return (byte_array[offset] & 0b00001111,)
+            yield byte_array[offset] & 0b00001111
     else:
         if index % 2 != 0:
             # we are ending on the first nibble of a byte
-            b = array.array('B', [read_nibble_gram(byte_array, index, 1)[0]])
+            yield from read_nibble_gram(byte_array, index, 1)
             offset += 1
-            new_length = length - 2
-        else:
-            b = array.array('B')
-            new_length = length
+            length -= 2
         for byte in byte_array[offset:offset+length//2]:
-            b.append((byte & 0b11110000) >> 4)
-            b.append(byte & 0b00001111)
+            yield (byte & 0b11110000) >> 4
+            yield byte & 0b00001111
         if index % 2 != 0:
             # we are ending on the first nibble of a byte
-            b.append(read_nibble_gram(byte_array, index + length - 1, 1)[0])
-        return tuple(b)
+            yield from read_nibble_gram(byte_array, index + length - 1, 1)
 
 
-NibbleGramsTypeHint = Dict[Tuple[NibbleGramTypeHint, ...], MutableSequence[int]]
+NibbleGramsTypeHint = Dict[Tuple[bytes, ...], array.array]
 CommonNibbleGramsTypeHint = Dict[int, NibbleGramsTypeHint]
 
 
-def find_common_nibble_grams(certificates,
+def find_common_nibble_grams(certificates: Sequence[Sequence[int]],
                              nibble_gram_lengths=(1, 2, 4, 8, 16),
-                             status_callback: StatusCallbackTypeHint = None) -> CommonNibbleGramsTypeHint:
+                             status_callback: StatusCallbackTypeHint = None,
+                             stop_when_sufficient: bool = False) -> CommonNibbleGramsTypeHint:
     all_nibbles: CommonNibbleGramsTypeHint = {} # maps a nibble value to a common index
+    min_cert_length = min(len(c) for c in certificates)
     for nibble_gram_length in nibble_gram_lengths:
-        nibbles: NibbleGramsTypeHint = {}
+        nibbles: NibbleGramsTypeHint = defaultdict(lambda: array.array('L'))
         all_nibbles[nibble_gram_length] = nibbles
-        range_max = min(len(c) for c in certificates)*2 - nibble_gram_length + 1
-        for index in range(0, range_max):
-            pair = tuple(read_nibble_gram(c, index, nibble_gram_length) for c in certificates)
-            if pair in nibbles:
-                nibbles[pair].append(index)
-            else:
-                nibbles[pair] = array.array('L', [index])
+        range_max = min_cert_length * 2 - nibble_gram_length + 1
+        for index, pair in enumerate(zip(*(read_nibble_grams(c, nibble_gram_length) for c in certificates))):
+            nibbles[pair].append(index)
+            if stop_when_sufficient and len(nibbles) >= (16*nibble_gram_length) ** len(certificates):
+                return all_nibbles
             if status_callback is not None:
                 status_callback(index, range_max, "Building Index for %s-nibble-grams" % nibble_gram_length)
     return all_nibbles
 
 
 class BufferedNibbleGramReader:
-    def __init__(self, stream, max_nibble_gram_length = None):
+    def __init__(self, stream: BinaryIO, max_nibble_gram_length: int = None):
         self.stream = stream
         self.max_nibble_gram_length = max_nibble_gram_length
-        self._buffer = array.array('B')
+        self._buffer: Optional[bytearray] = bytearray()
         self.has_nibbles(1)
 
-    def get_nibbles(self, length):
+    def get_nibbles(self, length: int) -> Optional[bytes]:
         r = self.peek_nibbles(length)
-        if r is not None:
+        if r is not None and self._buffer is not None:
             del self._buffer[:length]
         return r
 
-    def peek_nibbles(self, length):
-        if not self.has_nibbles(length):
+    def peek_nibbles(self, length: int) -> Optional[bytes]:
+        if self._buffer is None or not self.has_nibbles(length):
             return None
         else:
-            return tuple(self._buffer[:length])
+            return bytes(self._buffer[:length])
 
-    def has_nibbles(self, length):
+    def has_nibbles(self, length: int) -> bool:
         if self._buffer is None:
             return False
         elif len(self._buffer) >= length:
@@ -149,8 +157,8 @@ class Encrypter(object):
     def get_header(self):
         return iter([])
 
-    def is_incomplete(self, buffers):
-        return buffers[0]
+    def is_incomplete(self, buffers) -> bool:
+        return bool(buffers[0])
 
     def get_max_length(self):
         if self.status_callback is None:
@@ -158,23 +166,25 @@ class Encrypter(object):
         else:
             return self.buffer_lengths[0]
 
-    def process_nibble(self, n, buffer_index, length):
+    def process_nibble(self, n: Optional[bytes], buffer_index: int, length: int) -> Optional[bytes]:
         if n is None and buffer_index > 0:
-            return tuple([0]*length)
+            return b'\0'*length
         else:
             return n
 
-    def get_tuple(self, ng, length):
-        if ng[0] is None or max(map(len,ng)) < length:
+    def get_tuple(self, ng: Tuple[Optional[bytes], ...], length) -> Optional[Tuple[Optional[bytes], ...]]:
+        if None in ng or max(len(n) for n in ng) < length:
             return None
         else:
-            return tuple(ng)
+            return ng
 
-    def are_valid_nibbles(self, ng, length):
-        return not (ng[0] is None or max(map(len,ng)) < length)
+    def are_valid_nibbles(self, ng: Tuple[Optional[bytes], ...], length):
+        return not (None in ng or max(len(n) for n in ng) < length)
 
-    def process_nibbles(self, ng, length, buffers):
-        pair = tuple(ng)
+    def process_nibbles(self, pair: Tuple[bytes, ...], length: int, buffers) -> Generator[int, None, None]:
+        if length > 16:
+            # if we want to support longer lengths, we will have to allocate more bits in the header, pearhaps using the currently used one
+            raise Exception("Lenticrypt's encoding currently only supports nibble gram lengths up to 16")
         if pair in self.substitution_alphabet[length]:
             # consume the nibbles!
             for b in buffers:
@@ -191,12 +201,10 @@ class Encrypter(object):
             elif index < 4294967296:
                 index_bytes = 4
                 index_type = "L" # unsigned long
-            assert(length <= 16) # if we want to support longer lengths, we will have to allocate more bits in the header, pearhaps using the currently used one
             block_header = ((length - 1) << 3) | (index_bytes - 1)
-            for byte in struct.pack("<B" + index_type, block_header, index):
-                yield byte
+            yield from iter(struct.pack("<B" + index_type, block_header, index))
         elif length == 1:
-            sys.stderr.write("Warning: there is insufficient entropy in the input secrets to encode the byte pair " + str(pair) + "! The resulting ciphertext will not decrypt to the correct plaintext.\n")
+            sys.stderr.write(f"Warning: there is insufficient entropy in the input secrets to encode the byte pair {pair!r}! The resulting ciphertext will not decrypt to the correct plaintext.\n")
             # consume these bytes
             for b in buffers:
                 b.get_nibbles(length)
@@ -215,10 +223,7 @@ class Encrypter(object):
                 if self.status_callback is not None:
                     count += 1
                     self.status_callback(count, max_length, "Encrypting")
-                ng = []
-                for i, b in enumerate(buffers):
-                    n = b.peek_nibbles(length)
-                    ng.append(self.process_nibble(n, i, length))
+                ng = tuple(self.process_nibble(b.peek_nibbles(length), i, length) for i, b in enumerate(buffers))
                 if not self.are_valid_nibbles(ng, length):
                     continue
                 success = False
@@ -292,10 +297,10 @@ def decode(byte_array: Union[bytes, bytearray, BinaryIO]) -> Optional[int]:
     if isinstance(byte_array, bytes) or isinstance(byte_array, bytearray):
         byte_array = BytesIO(byte_array)
     num_trailing_bytes = 0
-    byte = byte_array.read(1)
-    if len(byte) < 1:
+    raw_byte = byte_array.read(1)
+    if len(raw_byte) < 1:
         return None
-    byte = byte[0]
+    byte: int = raw_byte[0]
     # remove everything to the left of the first zero:
     if not (byte & 0b10000000):
         pass
@@ -320,10 +325,10 @@ def decode(byte_array: Union[bytes, bytearray, BinaryIO]) -> Optional[int]:
     n: int = byte
     for i in range(num_trailing_bytes):
         n <<= 8
-        byte = byte_array.read(1)
-        if len(byte) < 1:
+        raw_byte = byte_array.read(1)
+        if len(raw_byte) < 1:
             raise Exception("Error: expected another byte in the stream!")
-        byte = byte[0]
+        byte = raw_byte[0]
         n |= byte
     return n
 
@@ -503,7 +508,7 @@ index_type_map = {
 
 
 class IOWrapper(object):
-    def __init__(self, wrapped: Union[str, BinaryIO]):
+    def __init__(self, wrapped: Union[bytes, bytearray, BinaryIO, Iterable[int]]):
         self.wrapped = wrapped
         self._file = None
 
@@ -576,7 +581,7 @@ def _decrypt_dictionary(stream, file_length, cert):
                 num_bytes += 1
 
 
-def decrypt(ciphertext: Iterable[int], certificate, cert=None, file_length=None) -> Iterator[int]:
+def decrypt(ciphertext: Iterable[int], certificate, cert=None, file_length=None) -> Generator[int, None, None]:
     # the file format is specified in a comment at the top of the encrypt(...) function above.
     if cert is None:
         cert = []

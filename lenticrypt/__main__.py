@@ -18,7 +18,7 @@ def main(argv=None):
         description="A simple cryptosystem with provable plausible deniability.  " + copyright_message,
         prog="lenticrypt")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("-e", "--encrypt", action="append", nargs=2, type=argparse.FileType('r'),
+    group.add_argument("-e", "--encrypt", action="append", nargs=2, type=argparse.FileType('rb'),
                        metavar=('secret', 'plaintext'),
                        help="encrypts the given plaintext file(s) into a single ciphertext using the given secret file(s).  Additional secret/plaintext pairs can be specified by providing the `-e` option multiple times.  For example, `-e secret1 plaintext1 -e secret2 plaintext2 -e secret3 plaintext3 ...`.  If the `-l` argument is used, any plaintext that is longer than the first one provided will be truncated.  Any plaintext that is shorter than the first one provided will be tail-padded with zeros.")
     group.add_argument("-d", "--decrypt", nargs=2, type=str, metavar=('secret', 'ciphertext'),
@@ -122,7 +122,7 @@ def main(argv=None):
         if not args.quiet:
             callback = ProgressBarCallback()
         try:
-            substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths=[1], status_callback=callback)
+            substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths=(1,), status_callback=callback, stop_when_sufficient=True)
         except (KeyboardInterrupt, SystemExit):
             # die gracefully, without a stacktrace
             exit(1)
