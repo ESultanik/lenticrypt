@@ -11,7 +11,10 @@ from typing import Any, BinaryIO, Callable, Dict, Generator, IO, Iterable, List,
 from .iowrapper import get_length, IOWrapper
 from .utils import FrozenDict
 
-ENCRYPTION_VERSION = 3
+ENCRYPTION_VERSION: int = 3
+MAJOR_VERSION: int = 0
+MINOR_VERSION: int = 1
+VERSION: str = f"{MAJOR_VERSION}.{ENCRYPTION_VERSION}.{MINOR_VERSION}"
 
 StatusCallbackTypeHint = Optional[Callable[[int, int, str], Any]]
 

@@ -1,11 +1,13 @@
 from setuptools import setup, find_packages
 
+from lenticrypt import VERSION
+
 setup(
     name='lenticrypt',
     description='A simple cryptosystem that provides provable plausibly deniable encryption. Lenticrypt can generate a single ciphertext file such that different plaintexts are generated depending on which key is used for decryption.',
     url='https://github.com/ESultanik/lenticrypt',
     author='Evan Sultanik',
-    version='0.3.1',
+    version=VERSION,
     packages=find_packages(),
     python_requires='>=3.6',
     install_requires=[],

@@ -4,7 +4,7 @@ import itertools
 import random
 import sys
 
-from .lenticrypt import ENCRYPTION_VERSION, find_common_nibble_grams, Encrypter, LengthChecksumEncrypter, DictionaryEncrypter
+from .lenticrypt import ENCRYPTION_VERSION, find_common_nibble_grams, Encrypter, LengthChecksumEncrypter, DictionaryEncrypter, VERSION
 from .progress import ProgressBarCallback
 
 
@@ -15,7 +15,7 @@ def main(argv=None):
     copyright_message = "Copyright (C) 2012--2019, Evan A. Sultanik, Ph.D.  \nhttps://www.sultanik.com/\n"
 
     parser = argparse.ArgumentParser(
-        description="A simple cryptosystem with provable plausible deniability.  " + copyright_message,
+        description="A toy cryptosystem with provable plausible deniability.  " + copyright_message,
         prog="lenticrypt")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("-e", "--encrypt", action="append", nargs=2, type=argparse.FileType('rb'),
@@ -55,7 +55,7 @@ def main(argv=None):
         random.seed(args.seed)
 
     if args.version:
-        sys.stdout.write(f"Cryptosystem Version: {ENCRYPTION_VERSION / 10.0}\n{copyright_message}\n")
+        sys.stdout.write(f"Lenticrypt {VERSION}\nCryptosystem Version {ENCRYPTION_VERSION}\n{copyright_message}\n")
     elif args.encrypt:
         secrets = tuple(bytearray(s[0].read()) for s in args.encrypt)
         nibble_gram_lengths = [1, 2, 4, 8, 16]
