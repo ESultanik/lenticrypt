@@ -1,6 +1,4 @@
 import array
-import collections.abc
-import gzip
 import itertools
 import random
 import struct
@@ -8,7 +6,9 @@ import sys
 
 from collections import defaultdict
 from io import BytesIO
-from typing import Any, BinaryIO, Callable, Dict, Generator, IO, Iterable, List, Optional, Sequence, Sized, Tuple, Union
+from typing import Any, BinaryIO, Callable, Dict, Generator, IO, Iterable, List, Optional, Sequence, Tuple, Union
+
+from .iowrapper import get_length, IOWrapper
 
 ENCRYPTION_VERSION = 3
 
@@ -26,7 +26,7 @@ def read_nibbles(byte_array: Sequence[int]) -> Generator[int, None, None]:
         yield b & 0b00001111
 
 
-NibbleGramTypeHint = Generator[bytes, None, None]#Tuple[int, ...]
+NibbleGramTypeHint = Generator[bytes, None, None]
 
 
 def read_nibble_grams(byte_array: Sequence[int], length: int = 1) -> NibbleGramTypeHint:
@@ -34,28 +34,6 @@ def read_nibble_grams(byte_array: Sequence[int], length: int = 1) -> NibbleGramT
         raise ValueError(f'length must be a power of two; received {length}')
 
     return (bytes(ng) for ng in zip(*(itertools.islice(nibbles, i, None) for i, nibbles in enumerate(itertools.tee(read_nibbles(byte_array), length)))))
-
-
-def old():
-    offset = index // 2
-    if length == 1:
-        # we are reading a single nibble, which is an edge case since in all other cases we are reading whole bytes
-        if index % 2 == 0:
-            yield (byte_array[offset] & 0b11110000) >> 4
-        else:
-            yield byte_array[offset] & 0b00001111
-    else:
-        if index % 2 != 0:
-            # we are ending on the first nibble of a byte
-            yield from read_nibble_gram(byte_array, index, 1)
-            offset += 1
-            length -= 2
-        for byte in byte_array[offset:offset+length//2]:
-            yield (byte & 0b11110000) >> 4
-            yield byte & 0b00001111
-        if index % 2 != 0:
-            # we are ending on the first nibble of a byte
-            yield from read_nibble_gram(byte_array, index + length - 1, 1)
 
 
 NibbleGramsTypeHint = Dict[Tuple[bytes, ...], array.array]
@@ -124,20 +102,6 @@ class BufferedNibbleGramReader:
         return not self.eof()
 
     __nonzero__ = __bool__
-
-
-def get_length(stream: IO) -> int:
-    """Gets the number of bytes in the stream."""
-    old_position = stream.tell()
-    stream.seek(0)
-    length = 0
-    while True:
-        r = stream.read(1024)
-        if not r:
-            break
-        length += len(r)
-    stream.seek(old_position)
-    return length
 
 
 class Encrypter(object):
@@ -492,43 +456,6 @@ index_type_map = {
     2 : 'H',
     4 : 'L',
     8 : 'Q'}
-
-
-class IOWrapper(object):
-    def __init__(self, wrapped: Union[bytes, bytearray, BinaryIO, Iterable[int]]):
-        self.wrapped = wrapped
-        self._file = None
-
-    def new_instance(self):
-        if self.wrapped == '-':
-            return sys.stdin
-        elif isinstance(self.wrapped, collections.abc.Iterable):
-            if not isinstance(self.wrapped, bytes) and not isinstance(self.wrapped, bytearray):
-                return BytesIO(bytes([b for b in self.wrapped]))
-            else:
-                return BytesIO(self.wrapped)
-        else:
-            return open(self.wrapped)
-
-    def __enter__(self):
-        if isinstance(self.wrapped, BytesIO) or isinstance(self.wrapped, gzip.GzipFile):
-            return self.wrapped
-        else:
-            self._file = self.new_instance()
-            return self._file.__enter__()
-
-    def __exit__(self, type, value, tb):
-        if self._file is not None:
-            self._file.__exit__(type, value, tb)
-            self._file = None
-
-
-class GzipIOWrapper(IOWrapper):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def new_instance(self):
-        return gzip.GzipFile(fileobj=super().new_instance())
 
 
 def _decrypt_dictionary(stream, file_length, cert):
