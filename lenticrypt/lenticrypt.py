@@ -8,7 +8,7 @@ import sys
 
 from collections import defaultdict
 from io import BytesIO
-from typing import Any, BinaryIO, Callable, Dict, Generator, IO, Iterable, Optional, Sequence, Sized, Tuple, Union
+from typing import Any, BinaryIO, Callable, Dict, Generator, IO, Iterable, List, Optional, Sequence, Sized, Tuple, Union
 
 ENCRYPTION_VERSION = 3
 
@@ -210,8 +210,7 @@ class Encrypter(object):
                 b.get_nibbles(length)
 
     def __iter__(self):
-        for byte in self.get_header():
-            yield byte
+        yield from self.get_header()
         max_length = self.get_max_length()
         if self.status_callback is not None:
             max_length *= len(self.sorted_lengths) * 2
@@ -244,7 +243,7 @@ class LengthChecksumEncrypter(Encrypter):
         return 2
 
     def is_incomplete(self, buffers):
-        return sum(map(lambda b : not b.eof(), buffers))
+        return sum(1 for b in buffers if not b.eof())
 
     def get_max_length(self):
         if self.status_callback is None:
@@ -253,12 +252,12 @@ class LengthChecksumEncrypter(Encrypter):
             return max(self.buffer_lengths)
 
     def are_valid_nibbles(self, ng, length):
-        return max(map(len,ng)) >= length
+        return max(len(n) for n in ng) >= length
 
-    def process_nibble(self, n, buffer_index, length):
+    def process_nibble(self, n: Optional[bytes], buffer_index, length) -> Optional[bytes]:
         if n is None:
             # if we are using a length checksum, we can make the padded bytes random:
-            return tuple([random.randint(0, 15) for j in range(length)])
+            return bytes([random.randint(0, 15) for _ in range(length)])
         else:
             return n
 
@@ -266,8 +265,7 @@ class LengthChecksumEncrypter(Encrypter):
         block_header = 0b10000000 | self.get_encryption_version() # the magic length checksum bit and filetype version number
         yield block_header
         lengths = tuple(BytesIO(struct.pack("<Q", get_length(l))) for l in self.to_encrypt)
-        for b in Encrypter(self.substitution_alphabet, lengths, status_callback=None):
-            yield b
+        yield from iter(Encrypter(self.substitution_alphabet, lengths, status_callback=None))
 
 
 encoding_steps = [(0b01111111, 0),
@@ -290,7 +288,7 @@ def encode(n: int) -> bytearray:
             return ret
         n >>= 8
         ret = bytearray([n & 0b11111111]) + ret
-    raise Exception("Integer %s is too big to encode!  The biggest value supported is %s." % (orig_n, MAX_ENCODE_VALUE))
+    raise Exception(f"Integer {orig_n} is too big to encode!  The biggest value supported is {MAX_ENCODE_VALUE}.")
 
 
 def decode(byte_array: Union[bytes, bytearray, BinaryIO]) -> Optional[int]:
@@ -337,8 +335,8 @@ def decode(byte_array: Union[bytes, bytearray, BinaryIO]) -> Optional[int]:
 class DictionaryEncrypter(LengthChecksumEncrypter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.dictionary = {}
-        self.dictionary_items = []
+        self.dictionary: Dict[Tuple[bytes, ...], int] = {}
+        self.dictionary_items: List[Tuple[bytes, ...]] = []
         self.build_dictionary()
 
     def get_encryption_version(self):
@@ -350,20 +348,16 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
             max_length *= len(self.sorted_lengths) * 2
         count = 0
         buffers = [BufferedNibbleGramReader(e, self.sorted_lengths[0]) for e in self.to_encrypt]
-        dictionary_hits = {}
+        dictionary_hits: Dict[Tuple[bytes, ...], int] = {}
         while self.is_incomplete(buffers):
             # if the files are not the same length, encrypt to the length of to_encrypt1
             for length_num, length in enumerate(self.sorted_lengths):
                 if self.status_callback is not None:
                     count += 1
                     self.status_callback(count, max_length, "Building Dictionary")
-                ng = []
-                for i, b in enumerate(buffers):
-                    n = b.peek_nibbles(length)
-                    ng.append(self.process_nibble(n, i, length))
-                if not self.are_valid_nibbles(ng, length):
+                pair = tuple(self.process_nibble(b.peek_nibbles(length), i, length) for i, b in enumerate(buffers))
+                if not self.are_valid_nibbles(pair, length):
                     continue
-                pair = tuple(ng)
                 if pair in self.substitution_alphabet[length]:
                     # consume the nibbles!
                     for b in buffers:
@@ -377,10 +371,8 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
                         count += len(self.sorted_lengths) - (length_num + 1)
                     break
         # make sure that the dictionary contains all of the 1-nibble grams:
-        missing_grams = set(itertools.product(*[map(lambda j : (j,), range(16)) for i in range(len(self.to_encrypt))]))
-        for item in self.dictionary_items:
-            missing_grams.discard(item)
-        for missing in missing_grams:
+        missing_grams = set(itertools.product(*[[bytes([j]) for j in range(16)] for _ in range(len(self.to_encrypt))]))
+        for missing in missing_grams - dictionary_hits.keys():
             self.dictionary_items.append(missing)
             dictionary_hits[missing] = 1
         self.dictionary_items = sorted(self.dictionary_items, key=lambda p: dictionary_hits[p], reverse=True)
@@ -389,32 +381,27 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
         for e in self.to_encrypt:
             e.seek(0)
 
-    def process_nibbles(self, ng, length, buffers):
-        pair = tuple(ng)
+    def process_nibbles(self, pair, length, buffers):
         if pair in self.dictionary:
             # consume the nibbles!
             for b in buffers:
                 b.get_nibbles(length)
-            for byte in encode(self.dictionary[pair]):
-                yield byte
+            yield from iter(encode(self.dictionary[pair]))
         elif length == 1:
-            sys.stderr.write("Warning: there is insufficient entropy in the input secrets to encode the byte pair " + str(pair) + "! The resulting ciphertext will not decrypt to the correct plaintext.\n")
+            sys.stderr.write(f"Warning: there is insufficient entropy in the input secrets to encode the byte pair {pair}! The resulting ciphertext will not decrypt to the correct plaintext.\n")
             # consume these bytes
             for b in buffers:
                 b.get_nibbles(length)
 
     def get_header(self):
-        for byte in super(DictionaryEncrypter, self).get_header():
-            yield byte
+        yield from super().get_header()
         # add the dictionary:
-        for byte in encode(len(self.dictionary)):
-            yield byte
+        yield from iter(encode(len(self.dictionary)))
         for pair in self.dictionary_items:
-            index = self.substitution_alphabet[len(pair[0])][pair][0]
-            for byte in encode(index):
-                yield byte
             lp = len(pair[0])
-            assert lp <= 255
+            assert lp <= 255 and lp in self.substitution_alphabet
+            index = self.substitution_alphabet[lp][pair][0]
+            yield from iter(encode(index))
             yield lp
 
 
