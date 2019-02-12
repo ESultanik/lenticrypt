@@ -104,6 +104,11 @@ class BufferedNibbleGramReader:
     __nonzero__ = __bool__
 
 
+# block header, 8 bits:
+# MSB -> X X X X X X X X <- LSB
+#                 |-----| <-- index_bytes - 1 (since index_bytes is always greater than zero)
+#         |-------| <-- length - 1 (since length is always greater than zero)
+#       |-| <-- If 1, then the following 7 bits are a filetype version number and the following blocks are the encrypted 8 bytes encoding the length of the file
 class Encrypter(object):
     def __init__(
             self,
@@ -369,93 +374,12 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
             yield lp
 
 
-# block header, 8 bits:
-# MSB -> X X X X X X X X <- LSB
-#                 |-----| <-- index_bytes - 1 (since index_bytes is always greater than zero)
-#         |-------| <-- length - 1 (since length is always greater than zero)
-#       |-| <-- If 1, then the following 7 bits are a filetype version number and the following blocks are the encrypted 8 bytes encoding the length of the file
-# def encrypt(
-#         substitution_alphabet: CommonNibbleGramsTypeHint,
-#         to_encrypt: Union[Sequence[int], Sequence[BinaryIO]],
-#         add_length_checksum: bool = False,
-#         status_callback: StatusCallbackTypeHint = None):
-#     if add_length_checksum:
-#         block_header = 0b10000000 | ENCRYPTION_VERSION # the magic length checksum bit and filetype version number
-#         yield block_header
-#         lengths = tuple(get_length(BytesIO(struct.pack("<Q", l))) for l in to_encrypt)
-#         yield from encrypt(substitution_alphabet, lengths, add_length_checksum=False, status_callback=None)
-#     sorted_lengths = sorted(substitution_alphabet.keys(), reverse=True)
-#     buffer_lengths = None
-#     if status_callback is not None:
-#         buffer_lengths = tuple(get_length(b) for b in to_encrypt)
-#     buffers = [BufferedNibbleGramReader(e, sorted_lengths[0]) for e in to_encrypt]
-#     max_length = None
-#     if add_length_checksum:
-#         completion_test = lambda: sum(map(lambda b : not b.eof(), buffers))
-#         if status_callback is not None:
-#             max_length = max(buffer_lengths)
-#     else:
-#         completion_test = lambda: buffers[0]
-#         if status_callback is not None:
-#             max_length = buffer_lengths[0]
-#     if status_callback is not None:
-#         max_length *= len(sorted_lengths) * 2
-#     count = 0
-#     while completion_test():
-#         # if the files are not the same length, encrypt to the length of to_encrypt1
-#         for length_num, length in enumerate(sorted_lengths):
-#             if status_callback is not None:
-#                 count += 1
-#                 status_callback(count, max_length, "Encrypting")
-#             ng = []
-#             for i, b in enumerate(buffers):
-#                 n = b.peek_nibbles(length)
-#                 if n is None and (i > 0 or add_length_checksum):
-#                     # this will happen if this plaintext is shorter than the first plaintext; just pad its tail with zeros
-#                     if add_length_checksum:
-#                         # but if we are using a length checksum, we can make the padded bytes random:
-#                         n = tuple([random.randint(0, 15) for j in range(length)])
-#                     else:
-#                         n = tuple([0]*length)
-#                 ng.append(n)
-#             if (ng[0] is None and not add_length_checksum) or max(map(len,ng)) < length:
-#                 continue
-#             pair = tuple(ng)
-#             if pair in substitution_alphabet[length]:
-#                 # consume the nibbles!
-#                 for b in buffers:
-#                     b.get_nibbles(length)
-#                 index = random.choice(substitution_alphabet[length][pair])
-#                 index_bytes = 8
-#                 index_type = "Q" # unsigned long long
-#                 if index < 256:
-#                     index_bytes = 1
-#                     index_type = "B" # unsigned char
-#                 elif index < 65536:
-#                     index_bytes = 2
-#                     index_type = "H" # unsigned short
-#                 elif index < 4294967296:
-#                     index_bytes = 4
-#                     index_type = "L" # unsigned long
-#                 assert(length <= 16) # if we want to support longer lengths, we will have to allocate more bits in the header, pearhaps using the currently used one
-#                 block_header = ((length - 1) << 3) | (index_bytes - 1)
-#                 for byte in struct.pack("<B" + index_type, block_header, index):
-#                     yield byte
-#                 if status_callback is not None:
-#                     count += len(sorted_lengths) - (length_num + 1)
-#                 break
-#             elif length == 1:
-#                 sys.stderr.write("Warning: there is insufficient entropy in the input secrets to encode the byte pair " + str(pair) + "! The resulting ciphertext will not decrypt to the correct plaintext.\n")
-#                 # consume these bytes
-#                 for b in buffers:
-#                     b.get_nibbles(length)
-
-
 index_type_map = {
-    1 : 'B',
-    2 : 'H',
-    4 : 'L',
-    8 : 'Q'}
+    1: 'B',
+    2: 'H',
+    4: 'L',
+    8: 'Q'
+}
 
 
 def _decrypt_dictionary(stream, file_length, cert):
@@ -466,7 +390,7 @@ def _decrypt_dictionary(stream, file_length, cert):
         index = decode(stream)
         b = stream.read(1)
         if len(b) < 1:
-            raise Exception("Unexpected end of file while decodeing dictionary!")
+            raise Exception("Unexpected end of file while decoding dictionary!")
         length = b[0]
         dictionary.append((index, length))
     last_nibble = None
@@ -474,7 +398,7 @@ def _decrypt_dictionary(stream, file_length, cert):
     while num_bytes < file_length:
         dict_index = decode(stream)
         if dict_index >= len(dictionary):
-            raise Exception("Invalid dictionary index %s!  Maximum valid index is %s." % (dict_index, len(dictionary)-1))
+            raise Exception(f"Invalid dictionary index {dict_index}!  Maximum valid index is {len(dictionary)-1}.")
         index, length = dictionary[dict_index]
         if length == 1:
             if last_nibble is None:
@@ -518,9 +442,9 @@ def decrypt(ciphertext: Iterable[int], certificate, cert=None, file_length=None)
             is_length_header = header & 0b10000000
             if is_length_header:
                 version = header & 0b01111111
-                sys.stderr.write("Found length header. File format version is " + str(version) + "\n")
+                sys.stderr.write(f"Found length header. File format version is {version}\n")
                 if version > ENCRYPTION_VERSION:
-                    sys.stderr.write("Warning: This ciphertext appears to have been encrypted with a newer version of the cryptosystem (version " + str(version / 10.0) + ").\n")                    
+                    sys.stderr.write(f"Warning: This ciphertext appears to have been encrypted with a newer version of the cryptosystem (version {(version / 10.0)!s}).\n")
                 # the next 8 encrypted bytes encode the length of the plaintext
                 raw_length = bytearray(decrypt(stream, None, cert=cert, file_length=8))
                 file_length = struct.unpack("<Q", raw_length)[0]
@@ -532,14 +456,14 @@ def decrypt(ciphertext: Iterable[int], certificate, cert=None, file_length=None)
                 continue
             index_bytes = (header & 0b00000111) + 1
             if index_bytes not in index_type_map:
-                raise Exception("Invalid block header: Received an invalid index byte length of " + str(index_bytes) + " bytes!")
+                raise Exception(f"Invalid block header: Received an invalid index byte length of {index_bytes!s} bytes!")
             length = ((header >> 3) & 0b00001111) + 1
             index = stream.read(index_bytes)
             if not index:
                 break
             n = struct.unpack("<" + index_type_map[index_bytes], index)[0]
             if n >= len(cert):
-                sys.stderr.write("Warning: Decrypted invalid certificate index %s (maximum value is %s)\n" % (n, len(cert)-1))
+                sys.stderr.write(f"Warning: Decrypted invalid certificate index {n} (maximum value is {len(cert)-1})\n")
                 if last_nibble is not None:
                     yield last_nibble
                     num_bytes += 1
