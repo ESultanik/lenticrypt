@@ -68,5 +68,6 @@ class TestLenticrypt(unittest.TestCase):
         self.assertEqual(0, lenticrypt.decode(lenticrypt.encode(0)))
         self.assertEqual(lenticrypt.MAX_ENCODE_VALUE, lenticrypt.decode(lenticrypt.encode(lenticrypt.MAX_ENCODE_VALUE)))
 
+
 if __name__ == '__main__':
     unittest.main()
