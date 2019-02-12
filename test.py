@@ -23,10 +23,10 @@ def make_valid_keys(n):
 
 class TestLenticrypt(unittest.TestCase):
     def setUp(self):
-        self.plaintexts = tuple(random_string(1024) for _ in range(2))
+        self.plaintexts = tuple(random_string(1024) for _ in range(3))
         while True:
-            #self.keys = tuple(random_string(1024) for _ in range(3))
-            self.keys = make_valid_keys(len(self.plaintexts))
+            self.keys = tuple(random_string(2**15) for _ in range(len(self.plaintexts)))
+            #self.keys = make_valid_keys(len(self.plaintexts))
             self.substitution_alphabet = lenticrypt.find_common_nibble_grams(self.keys)
             if len(self.substitution_alphabet[1]) >= 16**len(self.plaintexts):
                 break
