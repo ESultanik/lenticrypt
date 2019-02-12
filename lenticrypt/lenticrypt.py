@@ -9,6 +9,7 @@ from io import BytesIO
 from typing import Any, BinaryIO, Callable, Dict, Generator, IO, Iterable, List, Optional, Sequence, Tuple, Union
 
 from .iowrapper import get_length, IOWrapper
+from .utils import FrozenDict
 
 ENCRYPTION_VERSION = 3
 
@@ -374,12 +375,12 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
             yield lp
 
 
-index_type_map = {
+index_type_map = FrozenDict({
     1: 'B',
     2: 'H',
     4: 'L',
     8: 'Q'
-}
+})
 
 
 def _decrypt_dictionary(stream, file_length, cert):
