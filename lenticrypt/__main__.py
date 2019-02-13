@@ -4,7 +4,7 @@ import itertools
 import random
 import sys
 
-from .lenticrypt import ENCRYPTION_VERSION, find_common_nibble_grams, Encrypter, LengthChecksumEncrypter, DictionaryEncrypter, VERSION
+from .lenticrypt import ENCRYPTION_VERSION, decrypt, find_common_nibble_grams, Encrypter, LengthChecksumEncrypter, DictionaryEncrypter, VERSION
 from .progress import ProgressBarCallback
 
 
@@ -28,7 +28,7 @@ def main(argv=None):
 
     parser.add_argument("-f", "--force-encrypt", action="store_true", default=False,
                         help="force encryption, even if the secrets have insufficient entropy to correctly encrypt the plaintexts")
-    parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('wb'), default=sys.stdout,
+    parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('wb'), default=sys.stdout.buffer,
                         help="the output file (default to stdout)")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--same-length", action="store_true", default=False,
@@ -110,8 +110,9 @@ def main(argv=None):
                 callback.clear()
     elif args.decrypt:
         try:
-            for byte in decrypt(args.decrypt[1], args.decrypt[0]):
-                args.outfile.write(byte)
+            with gzip.GzipFile(args.decrypt[1]) as ciphertext:
+                with open(args.decrypt[0], 'rb') as secret:
+                    args.outfile.write(bytes(decrypt(ciphertext, secret)))
         except (KeyboardInterrupt, SystemExit):
             # die gracefully, without a stacktrace
             exit(1)

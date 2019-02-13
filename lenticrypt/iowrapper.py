@@ -1,9 +1,11 @@
 import collections.abc
 import gzip
+import sys
 
-from io import BytesIO, IOBase
-
+from io import BufferedReader, BytesIO, IOBase
 from typing import BinaryIO, IO, Iterable, Union
+
+IOWrappable = Union[bytes, bytearray, BinaryIO, Iterable[int]]
 
 
 def get_length(stream: IO) -> int:
@@ -23,13 +25,15 @@ def get_length(stream: IO) -> int:
 
 
 class IOWrapper(collections.abc.Sequence):
-    def __init__(self, wrapped: Union[bytes, bytearray, BinaryIO, Iterable[int]]):
+    def __init__(self, wrapped: IOWrappable):
         self.wrapped = wrapped
         self._file = None
 
     def new_instance(self):
         if self.wrapped == '-':
             return sys.stdin
+        elif isinstance(self.wrapped, IOWrapper):
+            return self.wrapped.new_instance()
         elif isinstance(self.wrapped, IOBase):
             return self.wrapped
         elif isinstance(self.wrapped, collections.abc.Iterable):
@@ -47,19 +51,36 @@ class IOWrapper(collections.abc.Sequence):
             with self.new_instance() as f:
                 return get_length(f)
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: Union[slice, int]) -> Union[int, bytes]:
         if isinstance(self.wrapped, collections.abc.Sequence):
             return self.wrapped[index]
         else:
             with self.new_instance() as f:
                 old_position = f.tell()
-                f.seek(index)
                 try:
-                    r = f.read(1)
-                    if r is None or len(r) < 1:
-                        return None
+                    if isinstance(index, slice):
+                        if index.start is None:
+                            index = slice(0, index.stop, index.step)
+                        if index.stop is None:
+                            index = slice(index.start, len(self), index.step)
+                        if index.step is None or index.step == 1:
+                            f.seek(index.start)
+                            return f.read(index.stop - index.start)
+                        else:
+                            ret = bytearray()
+                            for i in range(index.start, index.stop, index.step):
+                                f.seek(i)
+                                r = f.read(1)
+                                if r is None or len(r) < 1:
+                                    break
+                                ret.append(r)
+                            return bytes(ret)
                     else:
-                        return r[0]
+                        r = f.read(1)
+                        if r is None or len(r) < 1:
+                            return None
+                        else:
+                            return r[0]
                 finally:
                     f.seek(old_position)
 
@@ -81,3 +102,34 @@ class GzipIOWrapper(IOWrapper):
 
     def new_instance(self):
         return gzip.GzipFile(fileobj=super().new_instance())
+
+
+GZIP_MAGIC = b'\x1F\x8B'
+
+
+class AutoUnzippingStream:
+    def __init__(self, stream: IOWrappable):
+        self.__stream = stream
+        self.__to_close = None
+
+    def __enter__(self):
+        if self.__to_close is not None:
+            raise Exception(f"{self!r} is already a context manager")
+        to_close = []
+        stream = IOWrapper(self.__stream)
+        reader = BufferedReader(stream.__enter__())
+        if reader.peek(len(GZIP_MAGIC)) == GZIP_MAGIC:
+            ret = GzipIOWrapper(reader)
+            to_close.append(ret)
+            ret = ret.__enter__()
+        else:
+            ret = reader
+        self.__to_close = (stream,) + tuple(to_close)
+        return ret
+
+    def __exit__(self, *args, **kwargs):
+        try:
+            for stream in self.__to_close:
+                stream.__exit__(*args, **kwargs)
+        finally:
+            self.__to_close = None

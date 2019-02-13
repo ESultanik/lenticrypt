@@ -6,9 +6,9 @@ import sys
 
 from collections import defaultdict
 from io import BytesIO
-from typing import Any, BinaryIO, Callable, Dict, Generator, IO, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, BinaryIO, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Union
 
-from .iowrapper import get_length, IOWrapper
+from .iowrapper import get_length, IOWrappable, IOWrapper
 from .utils import FrozenDict
 
 ENCRYPTION_VERSION: int = 3
@@ -423,10 +423,13 @@ def _decrypt_dictionary(stream, file_length, cert):
                 num_bytes += 1
 
 
-def decrypt(ciphertext: Iterable[int], certificate, cert=None, file_length=None) -> Generator[int, None, None]:
+def decrypt(ciphertext: IOWrappable,
+            certificate: Optional[IOWrappable],
+            cert: Optional[bytearray] = None,
+            file_length: Optional[int] = None) -> Generator[int, None, None]:
     # the file format is specified in a comment at the top of the encrypt(...) function above.
     if cert is None:
-        cert = []
+        cert = bytearray()
         with IOWrapper(certificate) as stream:
             while True:
                 b = stream.read(1)
@@ -454,8 +457,7 @@ def decrypt(ciphertext: Iterable[int], certificate, cert=None, file_length=None)
                 file_length = struct.unpack("<Q", raw_length)[0]
                 sys.stderr.write("Plaintext file length is " + str(file_length) + " bytes\n")
                 if version == 3:
-                    for byte in _decrypt_dictionary(stream, file_length, cert):
-                        yield byte
+                    yield from _decrypt_dictionary(stream, file_length, cert)
                     return
                 continue
             index_bytes = (header & 0b00000111) + 1
