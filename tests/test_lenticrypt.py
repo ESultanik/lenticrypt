@@ -7,6 +7,7 @@ from io import BytesIO
 
 import lenticrypt
 
+
 def random_string(length):
     s = bytearray()
     for i in range(length):
@@ -14,18 +15,11 @@ def random_string(length):
     return s
 
 
-def make_valid_keys(n):
-    """makes keys that have enough entropy to encrypt n different plaintexts"""
-    remaining = list(itertools.product(*itertools.tee(range(255), n)))
-    return tuple(bytes(r[k] for r in remaining) for k in range(n))
-
-
 class TestLenticrypt(unittest.TestCase):
     def setUp(self):
         self.plaintexts = tuple(random_string(1024) for _ in range(3))
         while True:
             self.keys = tuple(random_string(2**15) for _ in range(len(self.plaintexts)))
-            #self.keys = make_valid_keys(len(self.plaintexts))
             self.substitution_alphabet = lenticrypt.find_common_nibble_grams(self.keys)
             if len(self.substitution_alphabet[1]) >= 16**len(self.plaintexts):
                 break
@@ -66,24 +60,6 @@ class TestLenticrypt(unittest.TestCase):
         # also make sure to test the extremal cases!
         self.assertEqual(0, lenticrypt.decode(lenticrypt.encode(0)))
         self.assertEqual(lenticrypt.MAX_ENCODE_VALUE, lenticrypt.decode(lenticrypt.encode(lenticrypt.MAX_ENCODE_VALUE)))
-
-
-class TestUtils(unittest.TestCase):
-    def test_frozen_dict(self):
-        source_dict = {chr(i): i for i in range(ord('a'), ord('a') + 26)}
-
-        d = lenticrypt.utils.FrozenDict(source_dict)
-
-        self.assertEqual(source_dict, d)
-        self.assertEqual(len(d), 26)
-
-        # Make sure item assignment raises an exception:
-        def assignment(d=d):
-            d['A'] = 1337
-        self.assertRaises(TypeError, assignment)
-
-        # Make sure the hashing works by adding the same element twice into a set:
-        self.assertEqual(len(frozenset([d, d])), 1)
 
 
 if __name__ == '__main__':

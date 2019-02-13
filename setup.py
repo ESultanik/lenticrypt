@@ -8,7 +8,7 @@ setup(
     url='https://github.com/ESultanik/lenticrypt',
     author='Evan Sultanik',
     version=VERSION,
-    packages=find_packages(),
+    packages=find_packages(exclude=["*.tests", "*.tests.*", "tests.*", "tests"]),
     python_requires='>=3.6',
     install_requires=[],
     extras_require={},
@@ -24,5 +24,6 @@ setup(
         'Intended Audience :: End Users/Desktop',
         'License :: OSI Approved :: GNU General Public License v2 (GPLv2)',
         'Topic :: Security :: Cryptography'
-    ]
+    ],
+    test_suite="tests"
 )
