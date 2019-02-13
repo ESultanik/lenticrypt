@@ -1,11 +1,14 @@
 import argparse
 import gzip
 import itertools
+import logging
 import random
 import sys
 
 from .lenticrypt import ENCRYPTION_VERSION, decrypt, find_common_nibble_grams, Encrypter, LengthChecksumEncrypter, DictionaryEncrypter, VERSION
 from .progress import ProgressBarCallback
+
+logger = logging.getLogger(name='lenticrypt')
 
 
 def main(argv=None) -> int:
@@ -84,11 +87,12 @@ def main(argv=None) -> int:
             if callback is not None:
                 callback.clear()
         if len(substitution_alphabet[1]) < 16 ** len(secrets):
-            err_msg = "there is not sufficient coverage between the certificates to encrypt all possible bytes!\n"
+            err_msg = 'There is not sufficient coverage between the certificates to encrypt all possible bytes!'
             if args.force_encrypt:
-                sys.stderr.write(f"Warning: {err_msg}")
+                logger.warning(err_msg)
             else:
-                sys.stderr.write(f"Error: {err_msg}To supress this error, re-run with the `-f` option.\n")
+                logger.error(err_msg)
+                logger.info('To suppress this error, re-run with the `-f` option.')
                 return 1
         # let the secret files be garbage collected, if needed:
         secrets = None
@@ -134,15 +138,14 @@ def main(argv=None) -> int:
             if callback is not None:
                 callback.clear()
         if len(substitution_alphabet[1]) < 16 ** len(secrets):
-            sys.stderr.write(
-                "There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:\n")
-            sys.stderr.flush()
+            message = "There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:\n"
             for combination in itertools.product(*[range(16) for _ in range(len(secrets))]):
                 if tuple((c,) for c in combination) not in substitution_alphabet[1]:
-                    sys.stdout.write(str(tuple(map(chr, combination))) + "\n")
+                    message = f"{message}{tuple(chr(c) for c in combination)}\n"
+            logger.critical(message)
             return 1
         else:
-            sys.stderr.write("This set of secrets looks good!\n")
+            logger.info("This set of secrets looks good!")
             return 0
     return 0
 
