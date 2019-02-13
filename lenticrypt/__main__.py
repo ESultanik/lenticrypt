@@ -8,7 +8,7 @@ from .lenticrypt import ENCRYPTION_VERSION, decrypt, find_common_nibble_grams, E
 from .progress import ProgressBarCallback
 
 
-def main(argv=None):
+def main(argv=None) -> int:
     if argv is None:
         argv = sys.argv
 
@@ -28,7 +28,11 @@ def main(argv=None):
 
     parser.add_argument("-f", "--force-encrypt", action="store_true", default=False,
                         help="force encryption, even if the secrets have insufficient entropy to correctly encrypt the plaintexts")
-    parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('wb'), default=sys.stdout.buffer,
+    default_output = sys.stdout
+    if hasattr(default_output, 'buffer'):
+        # when running from unit tests, `sys.stdout` is a `FlushingStringIO` which has no `buffer` attribute
+        default_output = default_output.buffer
+    parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('wb'), default=default_output,
                         help="the output file (default to stdout)")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--same-length", action="store_true", default=False,
@@ -75,7 +79,7 @@ def main(argv=None):
                                                              status_callback=callback)
         except (KeyboardInterrupt, SystemExit):
             # die gracefully, without a stacktrace
-            exit(1)
+            return 1
         finally:
             if callback is not None:
                 callback.clear()
@@ -85,7 +89,7 @@ def main(argv=None):
                 sys.stderr.write(f"Warning: {err_msg}")
             else:
                 sys.stderr.write(f"Error: {err_msg}To supress this error, re-run with the `-f` option.\n")
-                exit(1)
+                return 1
         # let the secret files be garbage collected, if needed:
         secrets = None
         callback = None
@@ -104,7 +108,7 @@ def main(argv=None):
                                       status_callback=callback)))
         except (KeyboardInterrupt, SystemExit):
             # die gracefully, without a stacktrace
-            exit(1)
+            return 1
         finally:
             if callback is not None:
                 callback.clear()
@@ -115,7 +119,7 @@ def main(argv=None):
                     args.outfile.write(bytes(decrypt(ciphertext, secret)))
         except (KeyboardInterrupt, SystemExit):
             # die gracefully, without a stacktrace
-            exit(1)
+            return 1
     elif args.test:
         secrets = tuple(s.read() for s in args.test)
         callback = None
@@ -125,7 +129,7 @@ def main(argv=None):
             substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths=(1,), status_callback=callback, stop_when_sufficient=True)
         except (KeyboardInterrupt, SystemExit):
             # die gracefully, without a stacktrace
-            exit(1)
+            return 1
         finally:
             if callback is not None:
                 callback.clear()
@@ -136,11 +140,12 @@ def main(argv=None):
             for combination in itertools.product(*[range(16) for _ in range(len(secrets))]):
                 if tuple((c,) for c in combination) not in substitution_alphabet[1]:
                     sys.stdout.write(str(tuple(map(chr, combination))) + "\n")
-            exit(1)
+            return 1
         else:
             sys.stderr.write("This set of secrets looks good!\n")
-            exit(0)
+            return 0
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    exit(main())
