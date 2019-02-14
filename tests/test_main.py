@@ -59,8 +59,7 @@ class TestMain(unittest.TestCase):
     def test_entropy_test(self):
         args = ['lenticrypt', '-q']
         for k in self.keys:
-            args += ['-t', k]
-        self.assertEqual(main(args), 0)
+            self.assertEqual(main(args + ['-t', k]), 0)
 
     def test_crypto(self):
         encrypted = tempfile.NamedTemporaryFile(delete=False)
