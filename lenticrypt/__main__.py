@@ -8,6 +8,7 @@ import sys
 from .lenticrypt import ENCRYPTION_VERSION, decrypt, find_common_nibble_grams, Encrypter, LengthChecksumEncrypter, DictionaryEncrypter, VERSION
 from .progress import ProgressBarCallback
 
+logging.basicConfig(stream=sys.stderr, level=logging.INFO)
 logger = logging.getLogger(name='lenticrypt')
 
 
@@ -45,7 +46,8 @@ def main(argv=None) -> int:
     mode_group.add_argument("--dictionary", action="store_true", default=True,
                             help="encrypts the files using both the file length checksum used with the `-c` option, but also with an index dictionary that can greatly reduce ciphertext size.  This is the default mode for encryption.")
     group.add_argument("-v", "--version", action="store_true", default=False, help="prints version information")
-    parser.add_argument("-q", "--quiet", action="store_true", default=False, help="suppresses log messages")
+    parser.add_argument("-q", "--quiet", action="store_true", default=False, help="suppresses log messages; equivalent to `--log-level QUIET`")
+    parser.add_argument('-l', '--log-level', type=str.upper, choices={'QUIET', 'CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'}, default='INFO', help="Set Lenticrypt's log level (default=INFO)")
     compression_group = parser.add_mutually_exclusive_group()
     compression_group.add_argument("-1", "--fast", action="store_true", default=False)
     compression_group.add_argument("-2", dest="two", action="store_true", default=False)
@@ -57,6 +59,12 @@ def main(argv=None) -> int:
                         help="seeds the random number generator to the given value")
 
     args = parser.parse_args(argv[1:])
+
+    if args.quiet or args.log_level == 'QUIET':
+        logger.setLevel(logging.CRITICAL)
+        logger.propagate = False
+    else:
+        logger.setLevel(getattr(logging, args.log_level))
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -75,7 +83,7 @@ def main(argv=None) -> int:
         elif args.four:
             nibble_gram_lengths = nibble_gram_lengths[:4]
         callback = None
-        if not args.quiet:
+        if not args.quiet and sys.stderr.isatty():
             callback = ProgressBarCallback()
         try:
             substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths=nibble_gram_lengths,
@@ -97,7 +105,7 @@ def main(argv=None) -> int:
         # let the secret files be garbage collected, if needed:
         secrets = None
         callback = None
-        if not args.quiet:
+        if not args.quiet and sys.stderr.isatty():
             callback = ProgressBarCallback()
         try:
             with gzip.GzipFile(fileobj=args.outfile, mtime=1) as zipfile:
@@ -127,7 +135,7 @@ def main(argv=None) -> int:
     elif args.test:
         secrets = tuple(s.read() for s in args.test)
         callback = None
-        if not args.quiet:
+        if not args.quiet and sys.stderr.isatty():
             callback = ProgressBarCallback()
         try:
             substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths=(1,), status_callback=callback, stop_when_sufficient=True)
