@@ -1,8 +1,8 @@
 import array
 import itertools
+import logging
 import random
 import struct
-import sys
 
 from collections import defaultdict
 from io import BytesIO
@@ -10,6 +10,8 @@ from typing import Any, BinaryIO, Callable, Dict, Generator, List, Optional, Seq
 
 from .iowrapper import get_length, IOWrappable, IOWrapper
 from .utils import FrozenDict
+
+logger = logging.getLogger(name='lenticrypt')
 
 ENCRYPTION_VERSION: int = 3
 MAJOR_VERSION: int = 0
@@ -177,7 +179,7 @@ class Encrypter(object):
             block_header = ((length - 1) << 3) | (index_bytes - 1)
             yield from iter(struct.pack("<B" + index_type, block_header, index))
         elif length == 1:
-            sys.stderr.write(f"Warning: there is insufficient entropy in the input secrets to encode the byte pair {pair!r}! The resulting ciphertext will not decrypt to the correct plaintext.\n")
+            logger.warning(f"There is insufficient entropy in the input secrets to encode the byte pair {pair!r}! The resulting ciphertext will not decrypt to the correct plaintext.")
             # consume these bytes
             for b in buffers:
                 b.get_nibbles(length)
@@ -361,7 +363,7 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
                 b.get_nibbles(length)
             yield from iter(encode(self.dictionary[pair]))
         elif length == 1:
-            sys.stderr.write(f"Warning: there is insufficient entropy in the input secrets to encode the byte pair {pair}! The resulting ciphertext will not decrypt to the correct plaintext.\n")
+            logger.warning(f"There is insufficient entropy in the input secrets to encode the byte pair {pair}! The resulting ciphertext will not decrypt to the correct plaintext.")
             # consume these bytes
             for b in buffers:
                 b.get_nibbles(length)
@@ -449,13 +451,13 @@ def decrypt(ciphertext: IOWrappable,
             is_length_header = header & 0b10000000
             if is_length_header:
                 version = header & 0b01111111
-                sys.stderr.write(f"Found length header. File format version is {version}\n")
+                logger.info(f"Found length header. File format version is {version}")
                 if version > ENCRYPTION_VERSION:
-                    sys.stderr.write(f"Warning: This ciphertext appears to have been encrypted with a newer version of the cryptosystem (version {(version / 10.0)!s}).\n")
+                    logger.warning(f"This ciphertext appears to have been encrypted with a newer version of the cryptosystem (version {(version / 10.0)!s}).")
                 # the next 8 encrypted bytes encode the length of the plaintext
                 raw_length = bytearray(decrypt(stream, None, cert=cert, file_length=8))
                 file_length = struct.unpack("<Q", raw_length)[0]
-                sys.stderr.write("Plaintext file length is " + str(file_length) + " bytes\n")
+                logger.info(f"Plaintext file length is {file_length} bytes")
                 if version == 3:
                     yield from _decrypt_dictionary(stream, file_length, cert)
                     return
@@ -469,7 +471,7 @@ def decrypt(ciphertext: IOWrappable,
                 break
             n = struct.unpack("<" + index_type_map[index_bytes], index)[0]
             if n >= len(cert):
-                sys.stderr.write(f"Warning: Decrypted invalid certificate index {n} (maximum value is {len(cert)-1})\n")
+                logger.warning(f"Decrypted invalid certificate index {n} (maximum value is {len(cert)-1})")
                 if last_nibble is not None:
                     yield last_nibble
                     num_bytes += 1
