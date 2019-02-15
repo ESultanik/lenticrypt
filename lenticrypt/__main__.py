@@ -6,6 +6,7 @@ import random
 import sys
 
 from .lenticrypt import ENCRYPTION_VERSION, decrypt, find_common_nibble_grams, Encrypter, LengthChecksumEncrypter, DictionaryEncrypter, VERSION
+from .logger import ColorFormatter, DEFAULT_FORMAT as DEFAULT_LOG_FORMAT
 from .progress import ProgressBarCallback
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO)
@@ -63,8 +64,15 @@ def main(argv=None) -> int:
     if args.quiet or args.log_level == 'QUIET':
         logger.setLevel(logging.CRITICAL)
         logger.propagate = False
+        use_color = False
     else:
         logger.setLevel(getattr(logging, args.log_level))
+        use_color = sys.stderr.isatty()
+    if not logger.handlers:
+        logger.propagate = False
+        handler = logging.StreamHandler()
+        handler.setFormatter(ColorFormatter(DEFAULT_LOG_FORMAT, use_color=use_color))
+        logger.addHandler(handler)
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -146,10 +154,10 @@ def main(argv=None) -> int:
             if callback is not None:
                 callback.clear()
         if len(substitution_alphabet[1]) < 16 ** len(secrets):
-            message = "There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:\n"
+            message = "There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:"
             for combination in itertools.product(*[range(16) for _ in range(len(secrets))]):
                 if tuple((c,) for c in combination) not in substitution_alphabet[1]:
-                    message = f"{message}{tuple(chr(c) for c in combination)}\n"
+                    message = f"{message}\n{tuple(chr(c) for c in combination)}"
             logger.critical(message)
             return 1
         else:

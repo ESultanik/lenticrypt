@@ -1,4 +1,14 @@
+import enum
 from collections.abc import Hashable, Mapping
+
+
+class CGAColors(enum.Enum):
+    BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE = range(8)
+
+
+ANSI_RESET = "\033[0m"
+ANSI_COLOR = "\033[1;%dm"
+ANSI_BOLD = "\033[1m"
 
 
 class FrozenDict(Hashable, Mapping):
