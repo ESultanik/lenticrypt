@@ -11,7 +11,7 @@ In fact, Lenticrypt has the theoretical property that, under reasonable assumpti
 
 Lenticrypt _can_ provide secrecy, but it does not _guarantee_ it. _**Do not**_ rely on Lenticrypt alone if you care about the secrecy of your plaintexts! 
 
-More technical details on the cryptosystem as well as additional use-cases are described in [Issue 0x04](https://www.sultanik.com/pocorgtfo/pocorgtfo04.pdf) of [The International Journal of PoC||GTFO](https://www.sultanik.com/pocorgtfo/).
+More technical details on the cryptosystem as well as additional use-cases are described in [Issue 0x04](https://www.sultanik.com/pocorgtfo/#0x04) of [The International Journal of PoC||GTFO](https://www.sultanik.com/pocorgtfo/).
 
 ## Installation
 
