@@ -240,7 +240,11 @@ class LengthChecksumEncrypter(Encrypter):
         block_header = 0b10000000 | self.get_encryption_version() # the magic length checksum bit and filetype version number
         yield block_header
         lengths = tuple(BytesIO(struct.pack("<Q", get_length(l))) for l in self.to_encrypt)
-        yield from iter(Encrypter(self.substitution_alphabet, lengths, status_callback=None))
+        try:
+            yield from iter(Encrypter(self.substitution_alphabet, lengths, status_callback=None))
+        finally:
+            for length in lengths:
+                length.close()
 
 
 encoding_steps = [(0b01111111, 0),
@@ -267,44 +271,49 @@ def encode(n: int) -> bytearray:
 
 
 def decode(byte_array: Union[bytes, bytearray, BinaryIO]) -> Optional[int]:
+    to_close = None
     if isinstance(byte_array, bytes) or isinstance(byte_array, bytearray):
         byte_array = BytesIO(byte_array)
-    num_trailing_bytes = 0
-    raw_byte = byte_array.read(1)
-    if len(raw_byte) < 1:
-        return None
-    byte: int = raw_byte[0]
-    # remove everything to the left of the first zero:
-    if not (byte & 0b10000000):
-        pass
-    elif not (byte & 0b01000000):
-        byte = byte & 0b00111111
-        num_trailing_bytes = 1
-    elif not (byte & 0b00100000):
-        byte = byte & 0b00011111
-        num_trailing_bytes = 2
-    elif not (byte & 0b00010000):
-        byte = byte & 0b00001111
-        num_trailing_bytes = 3
-    elif not (byte & 0b00001000):
-        byte = byte & 0b00000111
-        num_trailing_bytes = 4
-    elif not (byte & 0b00000100):
-        byte = byte & 0b00000011
-        num_trailing_bytes = 5
-    elif not (byte & 0b00000010):
-        byte = byte & 0b00000001
-        num_trailing_bytes = 6
-    n: int = byte
-    for i in range(num_trailing_bytes):
-        n <<= 8
+        to_close = byte_array
+    try:
+        num_trailing_bytes = 0
         raw_byte = byte_array.read(1)
         if len(raw_byte) < 1:
-            raise Exception("Error: expected another byte in the stream!")
-        byte = raw_byte[0]
-        n |= byte
-    return n
-
+            return None
+        byte: int = raw_byte[0]
+        # remove everything to the left of the first zero:
+        if not (byte & 0b10000000):
+            pass
+        elif not (byte & 0b01000000):
+            byte = byte & 0b00111111
+            num_trailing_bytes = 1
+        elif not (byte & 0b00100000):
+            byte = byte & 0b00011111
+            num_trailing_bytes = 2
+        elif not (byte & 0b00010000):
+            byte = byte & 0b00001111
+            num_trailing_bytes = 3
+        elif not (byte & 0b00001000):
+            byte = byte & 0b00000111
+            num_trailing_bytes = 4
+        elif not (byte & 0b00000100):
+            byte = byte & 0b00000011
+            num_trailing_bytes = 5
+        elif not (byte & 0b00000010):
+            byte = byte & 0b00000001
+            num_trailing_bytes = 6
+        n: int = byte
+        for i in range(num_trailing_bytes):
+            n <<= 8
+            raw_byte = byte_array.read(1)
+            if len(raw_byte) < 1:
+                raise Exception("Error: expected another byte in the stream!")
+            byte = raw_byte[0]
+            n |= byte
+        return n
+    finally:
+        if to_close is not None:
+            to_close.close()
 
 # An encrypter for version 3 of the file spec.
 class DictionaryEncrypter(LengthChecksumEncrypter):

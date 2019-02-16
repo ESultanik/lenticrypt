@@ -115,9 +115,9 @@ class AutoUnzippingStream:
     def __enter__(self):
         if self.__to_close is not None:
             raise Exception(f"{self!r} is already a context manager")
-        to_close = []
         stream = IOWrapper(self.__stream)
         reader = BufferedReader(stream.__enter__())
+        to_close = [reader]
         if reader.peek(len(GZIP_MAGIC)) == GZIP_MAGIC:
             ret = GzipIOWrapper(reader)
             to_close.append(ret)

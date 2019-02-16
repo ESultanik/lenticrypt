@@ -77,93 +77,105 @@ def main(argv=None) -> int:
     if args.seed is not None:
         random.seed(args.seed)
 
-    if args.version:
-        sys.stdout.write(f"Lenticrypt {VERSION}\nCryptosystem Version {ENCRYPTION_VERSION}\n{copyright_message}\n")
-    elif args.encrypt:
-        secrets = tuple(bytearray(s[0].read()) for s in args.encrypt)
-        nibble_gram_lengths = [1, 2, 4, 8, 16]
-        if args.fast:
-            nibble_gram_lengths = nibble_gram_lengths[:1]
-        elif args.two:
-            nibble_gram_lengths = nibble_gram_lengths[:2]
-        elif args.three:
-            nibble_gram_lengths = nibble_gram_lengths[:3]
-        elif args.four:
-            nibble_gram_lengths = nibble_gram_lengths[:4]
-        callback = None
-        if not args.quiet and sys.stderr.isatty():
-            callback = ProgressBarCallback()
-        try:
-            substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths=nibble_gram_lengths,
-                                                             status_callback=callback)
-        except (KeyboardInterrupt, SystemExit):
-            # die gracefully, without a stacktrace
-            return 1
-        finally:
-            if callback is not None:
-                callback.clear()
-        if len(substitution_alphabet[1]) < 16 ** len(secrets):
-            err_msg = 'There is not sufficient coverage between the certificates to encrypt all possible bytes!'
-            if args.force_encrypt:
-                logger.warning(err_msg)
-            else:
-                logger.error(err_msg)
-                logger.info('To suppress this error, re-run with the `-f` option.')
+    try:
+        if args.version:
+            sys.stdout.write(f"Lenticrypt {VERSION}\nCryptosystem Version {ENCRYPTION_VERSION}\n{copyright_message}\n")
+        elif args.encrypt:
+            secrets = tuple(bytearray(s[0].read()) for s in args.encrypt)
+            nibble_gram_lengths = [1, 2, 4, 8, 16]
+            if args.fast:
+                nibble_gram_lengths = nibble_gram_lengths[:1]
+            elif args.two:
+                nibble_gram_lengths = nibble_gram_lengths[:2]
+            elif args.three:
+                nibble_gram_lengths = nibble_gram_lengths[:3]
+            elif args.four:
+                nibble_gram_lengths = nibble_gram_lengths[:4]
+            callback = None
+            if not args.quiet and sys.stderr.isatty():
+                callback = ProgressBarCallback()
+            try:
+                substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths=nibble_gram_lengths,
+                                                                 status_callback=callback)
+            except (KeyboardInterrupt, SystemExit):
+                # die gracefully, without a stacktrace
                 return 1
-        # let the secret files be garbage collected, if needed:
-        secrets = None
-        callback = None
-        if not args.quiet and sys.stderr.isatty():
-            callback = ProgressBarCallback()
-        try:
-            with gzip.GzipFile(fileobj=args.outfile, mtime=1) as zipfile:
-                # mtime is set to 1 so that the output files are always identical if a random seed argument is provided
-                if args.same_length:
-                    encrypter = Encrypter
-                elif args.length_checksum:
-                    encrypter = LengthChecksumEncrypter
+            finally:
+                if callback is not None:
+                    callback.clear()
+            if len(substitution_alphabet[1]) < 16 ** len(secrets):
+                err_msg = 'There is not sufficient coverage between the certificates to encrypt all possible bytes!'
+                if args.force_encrypt:
+                    logger.warning(err_msg)
                 else:
-                    encrypter = DictionaryEncrypter
-                zipfile.write(bytes(encrypter(substitution_alphabet, tuple(e[1] for e in args.encrypt),
-                                      status_callback=callback)))
-        except (KeyboardInterrupt, SystemExit):
-            # die gracefully, without a stacktrace
-            return 1
-        finally:
-            if callback is not None:
-                callback.clear()
-    elif args.decrypt:
-        try:
-            with gzip.GzipFile(args.decrypt[1]) as ciphertext:
-                with open(args.decrypt[0], 'rb') as secret:
-                    args.outfile.write(bytes(decrypt(ciphertext, secret)))
-        except (KeyboardInterrupt, SystemExit):
-            # die gracefully, without a stacktrace
-            return 1
-    elif args.test:
-        secrets = tuple(s.read() for s in args.test)
-        callback = None
-        if not args.quiet and sys.stderr.isatty():
-            callback = ProgressBarCallback()
-        try:
-            substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths=(1,), status_callback=callback, stop_when_sufficient=True)
-        except (KeyboardInterrupt, SystemExit):
-            # die gracefully, without a stacktrace
-            return 1
-        finally:
-            if callback is not None:
-                callback.clear()
-        if len(substitution_alphabet[1]) < 16 ** len(secrets):
-            message = "There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:"
-            for combination in itertools.product(*[range(16) for _ in range(len(secrets))]):
-                if tuple((c,) for c in combination) not in substitution_alphabet[1]:
-                    message = f"{message}\n{tuple(chr(c) for c in combination)}"
-            logger.critical(message)
-            return 1
-        else:
-            logger.info("This set of secrets looks good!")
-            return 0
-    return 0
+                    logger.error(err_msg)
+                    logger.info('To suppress this error, re-run with the `-f` option.')
+                    return 1
+            # let the secret files be garbage collected, if needed:
+            secrets = None
+            callback = None
+            if not args.quiet and sys.stderr.isatty():
+                callback = ProgressBarCallback()
+            try:
+                with gzip.GzipFile(fileobj=args.outfile, mtime=1) as zipfile:
+                    # mtime is set to 1 so that the output files are always identical if a random seed argument is provided
+                    if args.same_length:
+                        encrypter = Encrypter
+                    elif args.length_checksum:
+                        encrypter = LengthChecksumEncrypter
+                    else:
+                        encrypter = DictionaryEncrypter
+                    zipfile.write(bytes(encrypter(substitution_alphabet, tuple(e[1] for e in args.encrypt),
+                                          status_callback=callback)))
+            except (KeyboardInterrupt, SystemExit):
+                # die gracefully, without a stacktrace
+                return 1
+            finally:
+                if callback is not None:
+                    callback.clear()
+        elif args.decrypt:
+            try:
+                with gzip.GzipFile(args.decrypt[1]) as ciphertext:
+                    with open(args.decrypt[0], 'rb') as secret:
+                        args.outfile.write(bytes(decrypt(ciphertext, secret)))
+            except (KeyboardInterrupt, SystemExit):
+                # die gracefully, without a stacktrace
+                return 1
+        elif args.test:
+            secrets = tuple(s.read() for s in args.test)
+            callback = None
+            if not args.quiet and sys.stderr.isatty():
+                callback = ProgressBarCallback()
+            try:
+                substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths=(1,), status_callback=callback, stop_when_sufficient=True)
+            except (KeyboardInterrupt, SystemExit):
+                # die gracefully, without a stacktrace
+                return 1
+            finally:
+                if callback is not None:
+                    callback.clear()
+            if len(substitution_alphabet[1]) < 16 ** len(secrets):
+                message = "There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:"
+                for combination in itertools.product(*[range(16) for _ in range(len(secrets))]):
+                    if tuple((c,) for c in combination) not in substitution_alphabet[1]:
+                        message = f"{message}\n{tuple(chr(c) for c in combination)}"
+                logger.critical(message)
+                return 1
+            else:
+                logger.info("This set of secrets looks good!")
+                return 0
+        return 0
+    finally:
+        if args.encrypt:
+            for e in args.encrypt:
+                for encrypt_file in e:
+                    encrypt_file.close()
+        if args.outfile:
+            if args.outfile != sys.stdout:
+                args.outfile.close()
+        if args.test:
+            for test_file in args.test:
+                test_file.close()
 
 
 if __name__ == '__main__':
