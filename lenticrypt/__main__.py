@@ -1,11 +1,16 @@
 import argparse
 import gzip
 import itertools
+import logging
 import random
 import sys
 
 from .lenticrypt import ENCRYPTION_VERSION, decrypt, find_common_nibble_grams, Encrypter, LengthChecksumEncrypter, DictionaryEncrypter, VERSION
+from .logger import ColorFormatter, DEFAULT_FORMAT as DEFAULT_LOG_FORMAT
 from .progress import ProgressBarCallback
+
+logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+logger = logging.getLogger(name='lenticrypt')
 
 
 def main(argv=None) -> int:
@@ -42,7 +47,8 @@ def main(argv=None) -> int:
     mode_group.add_argument("--dictionary", action="store_true", default=True,
                             help="encrypts the files using both the file length checksum used with the `-c` option, but also with an index dictionary that can greatly reduce ciphertext size.  This is the default mode for encryption.")
     group.add_argument("-v", "--version", action="store_true", default=False, help="prints version information")
-    parser.add_argument("-q", "--quiet", action="store_true", default=False, help="suppresses log messages")
+    parser.add_argument("-q", "--quiet", action="store_true", default=False, help="suppresses log messages; equivalent to `--log-level QUIET`")
+    parser.add_argument('-l', '--log-level', type=str.upper, choices={'QUIET', 'CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'}, default='INFO', help="Set Lenticrypt's log level (default=INFO)")
     compression_group = parser.add_mutually_exclusive_group()
     compression_group.add_argument("-1", "--fast", action="store_true", default=False)
     compression_group.add_argument("-2", dest="two", action="store_true", default=False)
@@ -55,10 +61,23 @@ def main(argv=None) -> int:
 
     args = parser.parse_args(argv[1:])
 
-    try:
-        if args.seed is not None:
-            random.seed(args.seed)
+    if args.quiet or args.log_level == 'QUIET':
+        logger.setLevel(logging.CRITICAL)
+        logger.propagate = False
+        use_color = False
+    else:
+        logger.setLevel(getattr(logging, args.log_level))
+        use_color = sys.stderr.isatty()
+    if not logger.handlers:
+        logger.propagate = False
+        handler = logging.StreamHandler()
+        handler.setFormatter(ColorFormatter(DEFAULT_LOG_FORMAT, use_color=use_color))
+        logger.addHandler(handler)
 
+    if args.seed is not None:
+        random.seed(args.seed)
+
+    try:
         if args.version:
             sys.stdout.write(f"Lenticrypt {VERSION}\nCryptosystem Version {ENCRYPTION_VERSION}\n{copyright_message}\n")
         elif args.encrypt:
@@ -73,7 +92,7 @@ def main(argv=None) -> int:
             elif args.four:
                 nibble_gram_lengths = nibble_gram_lengths[:4]
             callback = None
-            if not args.quiet:
+            if not args.quiet and sys.stderr.isatty():
                 callback = ProgressBarCallback()
             try:
                 substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths=nibble_gram_lengths,
@@ -85,16 +104,17 @@ def main(argv=None) -> int:
                 if callback is not None:
                     callback.clear()
             if len(substitution_alphabet[1]) < 16 ** len(secrets):
-                err_msg = "there is not sufficient coverage between the certificates to encrypt all possible bytes!\n"
+                err_msg = 'There is not sufficient coverage between the certificates to encrypt all possible bytes!'
                 if args.force_encrypt:
-                    sys.stderr.write(f"Warning: {err_msg}")
+                    logger.warning(err_msg)
                 else:
-                    sys.stderr.write(f"Error: {err_msg}To supress this error, re-run with the `-f` option.\n")
+                    logger.error(err_msg)
+                    logger.info('To suppress this error, re-run with the `-f` option.')
                     return 1
             # let the secret files be garbage collected, if needed:
             secrets = None
             callback = None
-            if not args.quiet:
+            if not args.quiet and sys.stderr.isatty():
                 callback = ProgressBarCallback()
             try:
                 with gzip.GzipFile(fileobj=args.outfile, mtime=1) as zipfile:
@@ -124,7 +144,7 @@ def main(argv=None) -> int:
         elif args.test:
             secrets = tuple(s.read() for s in args.test)
             callback = None
-            if not args.quiet:
+            if not args.quiet and sys.stderr.isatty():
                 callback = ProgressBarCallback()
             try:
                 substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths=(1,), status_callback=callback, stop_when_sufficient=True)
@@ -135,28 +155,27 @@ def main(argv=None) -> int:
                 if callback is not None:
                     callback.clear()
             if len(substitution_alphabet[1]) < 16 ** len(secrets):
-                sys.stderr.write(
-                    "There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:\n")
-                sys.stderr.flush()
+                message = "There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:"
                 for combination in itertools.product(*[range(16) for _ in range(len(secrets))]):
                     if tuple((c,) for c in combination) not in substitution_alphabet[1]:
-                        sys.stdout.write(str(tuple(map(chr, combination))) + "\n")
+                        message = f"{message}\n{tuple(chr(c) for c in combination)}"
+                logger.critical(message)
                 return 1
             else:
-                sys.stderr.write("This set of secrets looks good!\n")
+                logger.info("This set of secrets looks good!")
                 return 0
         return 0
     finally:
         if args.encrypt:
             for e in args.encrypt:
-                for f in e:
-                    f.close()
+                for encrypt_file in e:
+                    encrypt_file.close()
         if args.outfile:
             if args.outfile != sys.stdout:
                 args.outfile.close()
         if args.test:
-            for t in args.test:
-                t.close()
+            for test_file in args.test:
+                test_file.close()
 
 
 if __name__ == '__main__':
