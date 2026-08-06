@@ -1,0 +1,97 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lenticrypt"
+description = "A simple cryptosystem that provides provable plausibly deniable encryption. Lenticrypt can generate a single ciphertext file such that different plaintexts are generated depending on which key is used for decryption."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-2.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "Evan A. Sultanik" }]
+keywords = ["cryptography", "deniable-encryption", "steganography"]
+dynamic = ["version"]
+dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security :: Cryptography",
+]
+
+[project.urls]
+Homepage = "https://github.com/ESultanik/lenticrypt"
+Article = "https://www.sultanik.com/pocorgtfo/#0x04"
+
+[project.scripts]
+lenticrypt = "lenticrypt.__main__:main"
+
+[dependency-groups]
+# Floors are deliberately well behind the newest release: a floor pinned to a just-published version
+# is unresolvable under an `exclude-newer` policy (e.g. /etc/uv/uv.toml here sets a 1-week cutoff),
+# and newer linter versions finding more issues is desirable, so the ranges stay open upward.
+# `ty` is pre-0.1 and its config surface is still moving, hence the tighter ceiling.
+dev = ["pytest>=8,<10", "ruff>=0.15,<1.0", "ty>=0.0.60,<0.1"]
+
+[tool.hatch.version]
+path = "lenticrypt/__about__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lenticrypt"]
+
+[tool.hatch.build.targets.sdist]
+include = ["lenticrypt", "tests", "README.md", "LICENSE"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = []
+
+[tool.ruff.lint]
+# `ANN` (annotations) is deliberately absent: the tree is only partially annotated, and turning it
+# on now would bury every other finding. It is enabled once the typing pass lands.
+select = [
+    "A",    # builtin shadowing
+    "ARG",  # unused arguments
+    "B",    # bugbear
+    "BLE",  # blind except
+    "C4",   # comprehensions
+    "E",    # pycodestyle errors
+    "EM",   # exception messages
+    "F",    # pyflakes
+    "FURB", # refurb
+    "G",    # logging format
+    "I",    # import sorting
+    "ISC",  # implicit str concat
+    "LOG",  # logging
+    "N",    # naming
+    "PERF", # perflint
+    "PIE",  # misc lints
+    "PTH",  # use pathlib
+    "RET",  # return values
+    "RUF",  # ruff-specific
+    "S",    # bandit
+    "SIM",  # simplify
+    "TRY",  # tryceratops
+    "UP",   # pyupgrade
+    "W",    # pycodestyle warnings
+]
+ignore = [
+    "G004", # f-strings in logging calls: these messages are cheap to format eagerly
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"] # asserts are the point of a test
+
+[tool.ty.environment]
+python-version = "3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
