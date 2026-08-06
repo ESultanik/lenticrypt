@@ -289,6 +289,10 @@ class Encrypter(object):
         """
         total = self.total_nibbles()
         consumed = 0
+        # Per-pass tallies. The dictionary pass and the encrypt pass each walk the plaintexts, so
+        # without resetting, the second pass reports the first one's grams again.
+        self._unencodable.clear()
+        self._unencodable_count = 0
         while self.is_incomplete(readers):
             for length in self.sorted_lengths:
                 grams = self._grams_at(readers, length)
@@ -319,10 +323,11 @@ class Encrypter(object):
                     )
                     raise LenticryptError(message)
                 break
-        if self._unencodable_count:
+        # Only summarise when there was more than the individually reported grams to report.
+        if self._unencodable_count > len(self._unencodable):
             logger.warning(
-                f"{self._unencodable_count} nibble-gram(s) could not be encoded; the ciphertext "
-                "will not decrypt to the correct plaintext."
+                f"{self._unencodable_count} nibble-gram(s) in total could not be encoded during "
+                f"{phase.lower()}; the ciphertext will not decrypt to the correct plaintext."
             )
 
     def __iter__(self) -> Generator[int, None, None]:
@@ -457,36 +462,35 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
         return 3
 
     def build_dictionary(self):
-        buffers = [BufferedNibbleGramReader(e) for e in self.to_encrypt]
-        dictionary_hits: Dict[Tuple[bytes, ...], int] = {}
-        # NOTE: this walk still has no length-1 fallback, so it cannot make progress when the
-        # secrets lack the entropy to encode a byte. Fixed separately.
-        while self.is_incomplete(buffers):
-            for length in self.sorted_lengths:
-                pair = self._grams_at(buffers, length)
-                if pair is None or not self.can_encode(pair, length):
-                    continue
-                for b in buffers:
-                    b.get_nibbles(length)
-                if pair not in dictionary_hits:
-                    self.dictionary_items.append(pair)
-                    dictionary_hits[pair] = 1
-                else:
-                    dictionary_hits[pair] += 1
-                break
-        # make sure that the dictionary contains all of the 1-nibble grams:
-        missing_grams = set(
-            itertools.product(
-                *[[bytes([j]) for j in range(16)] for _ in range(len(self.to_encrypt))]
-            )
-        )
-        for missing in missing_grams - dictionary_hits.keys():
-            self.dictionary_items.append(missing)
-            dictionary_hits[missing] = 1
-        self.dictionary_items = sorted(
-            self.dictionary_items, key=lambda p: dictionary_hits[p], reverse=True
-        )
-        self.dictionary = {v: idx for idx, v in enumerate(self.dictionary_items)}
+        """Counts which nibble-gram tuples the plaintexts use, most frequent first.
+
+        Driven by the shared walk, which supplies the length-1 fallback this pass lacked: with its
+        own loop, a gram the secrets could not encode consumed nothing and the walk spun forever --
+        exactly the `-f/--force-encrypt` case.
+        """
+        readers = [BufferedNibbleGramReader(stream) for stream in self.to_encrypt]
+        hits: Dict[Tuple[bytes, ...], int] = {}
+        for _length, grams in self.consume_grams(readers, "Building Dictionary"):
+            hits[grams] = hits.get(grams, 0) + 1
+        # Every single-nibble gram the secrets can encode needs an entry, so encryption can always
+        # fall back to length 1. Weight 0 keeps observed grams ahead of these fillers.
+        #
+        # Only grams actually in the substitution alphabet are added. Adding all 16**n
+        # unconditionally meant `get_header` later looked up a gram the alphabet lacked; because the
+        # alphabet is a defaultdict, that silently inserted an empty array and then raised
+        # IndexError on [0]. Iterated lazily rather than materialised as a set: 16**n is 16.7M
+        # tuples for 6 secrets.
+        encodable_single_grams = self.substitution_alphabet.get(1, {})
+        for gram in itertools.product(
+            *([bytes([nibble]) for nibble in range(16)] for _ in range(len(self.to_encrypt)))
+        ):
+            if gram not in hits and gram in encodable_single_grams:
+                hits[gram] = 0
+        # Sorted over the mapping rather than a set difference: iteration order of a set of tuples
+        # of `bytes` varies with PYTHONHASHSEED, so dictionary indices differed between runs and
+        # defeated `--seed` reproducibility. The gram itself breaks ties deterministically.
+        self.dictionary_items = sorted(hits, key=lambda gram: (-hits[gram], gram))
+        self.dictionary = {gram: index for index, gram in enumerate(self.dictionary_items)}
         # reset the files back to their first bytes
         for e in self.to_encrypt:
             e.seek(0)
@@ -503,14 +507,21 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
 
     def get_header(self):
         yield from super().get_header()
-        # add the dictionary:
+        # The dictionary itself: one (certificate offset, gram length) pair per entry.
         yield from iter(encode(len(self.dictionary)))
-        for pair in self.dictionary_items:
-            lp = len(pair[0])
-            assert lp <= 255 and lp in self.substitution_alphabet
-            index = self.substitution_alphabet[lp][pair][0]
-            yield from iter(encode(index))
-            yield lp
+        for grams in self.dictionary_items:
+            gram_length = len(grams[0])
+            # An explicit check rather than `assert`, which vanishes under -O. build_dictionary only
+            # admits grams the alphabet can encode, so reaching this is a bug, not bad input.
+            offsets = self.substitution_alphabet.get(gram_length, {}).get(grams)
+            if gram_length > 255 or not offsets:
+                message = (
+                    f"Cannot write a dictionary entry for {grams!r}: the substitution alphabet has "
+                    f"no offset for it at length {gram_length}. Please report this as a bug."
+                )
+                raise LenticryptError(message)
+            yield from iter(encode(offsets[0]))
+            yield gram_length
 
 
 index_type_map = FrozenDict({1: "B", 2: "H", 4: "L", 8: "Q"})
