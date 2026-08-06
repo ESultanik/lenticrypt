@@ -5,7 +5,15 @@ import logging
 import random
 import sys
 
-from .lenticrypt import ENCRYPTION_VERSION, decrypt, find_common_nibble_grams, Encrypter, LengthChecksumEncrypter, DictionaryEncrypter, VERSION
+from .core import (
+    ENCRYPTION_VERSION,
+    VERSION,
+    DictionaryEncrypter,
+    Encrypter,
+    LengthChecksumEncrypter,
+    decrypt,
+    find_common_nibble_grams,
+)
 from .logger import ColorFormatter, DEFAULT_FORMAT as DEFAULT_LOG_FORMAT
 from .progress import ProgressBarCallback
 
