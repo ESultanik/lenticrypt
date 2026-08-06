@@ -122,8 +122,20 @@ def main(argv=None) -> int:
             if not args.quiet and sys.stderr.isatty():
                 callback = ProgressBarCallback()
             try:
-                with gzip.GzipFile(fileobj=args.outfile, mtime=1) as zipfile:
-                    # mtime is set to 1 so that the output files are always identical if a random seed argument is provided
+                # `filename=''` suppresses the gzip FNAME field. Given only `fileobj`, gzip derives
+                # the stored name from `fileobj.name`, so the ciphertext carried the name it was
+                # written to -- in cleartext, recoverable with `dd`. For a tool whose purpose is
+                # deniability, `-o my-secret-plans.enc` leaking "my-secret-plans.enc" defeats the
+                # point. It also made output depend on the output path, so `--seed` could not give
+                # byte-identical results.
+                #
+                # `mode='wb'` is explicit because gzip on Python 3.14 warns that inferring write
+                # mode from `fileobj` will stop working.
+                #
+                # mtime=1 keeps the timestamp out of the header, for the same reproducibility reason.
+                with gzip.GzipFile(
+                    fileobj=args.outfile, mode="wb", mtime=1, filename=""
+                ) as zipfile:
                     if args.same_length:
                         encrypter = Encrypter
                     elif args.length_checksum:
