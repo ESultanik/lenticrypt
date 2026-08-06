@@ -33,5 +33,5 @@ class TestStdoutLifetime(unittest.TestCase):
         print("stdout is still usable")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
