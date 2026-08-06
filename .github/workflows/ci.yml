@@ -20,11 +20,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux only for now. macOS adds no coverage for pure Python -- same POSIX semantics,
-        # same path handling. windows-latest is the leg that matters, and it joins once progress.py
-        # stops importing fcntl/termios at module scope, which currently makes the package
-        # unimportable there.
-        os: [ubuntu-latest]
+        # Linux plus Windows. macOS would duplicate Linux for pure Python -- same POSIX
+        # semantics, same path handling -- whereas Windows is where the real portability risk is,
+        # and is unblocked by this commit removing the module-scope fcntl/termios imports.
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

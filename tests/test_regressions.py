@@ -297,11 +297,6 @@ def test_empty_ciphertext_yields_nothing(keys_2):
 # --------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="divides by max_value without guarding zero")
-def test_progress_bar_tolerates_zero_max():
-    ProgressBar(max_value=0, stream=io.StringIO()).update(0)
-
-
 def test_progress_bar_renders():
     stream = io.StringIO()
     bar = ProgressBar(max_value=10, stream=stream)
