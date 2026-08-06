@@ -41,9 +41,12 @@ LENGTH_CASES = [
     ("first-shorter", (37, 64)),
     ("odd-both", (31, 17)),
     ("one-byte", (1, 64)),
-    ("empty-second", (64, 0)),
     ("near-equal", (64, 63)),
 ]
+
+# Kept out of LENGTH_CASES because it fails for an unrelated reason -- see
+# test_empty_plaintext_roundtrip, which is a decrypt-side defect rather than an encrypter one.
+EMPTY_CASE = (64, 0)
 
 
 def roundtrip(encrypter_class, alphabet, keys, plaintexts):
@@ -60,10 +63,6 @@ def roundtrip(encrypter_class, alphabet, keys, plaintexts):
 CORRUPTING_SEED = 2024
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="LengthChecksumEncrypter pads over pending real nibbles without consuming them",
-)
 def test_length_checksum_roundtrip_all_lengths(alphabet_2, keys_2):
     """Right byte count, wrong contents, when plaintexts do not tile the nibble stream evenly."""
     random.seed(CORRUPTING_SEED)
@@ -74,7 +73,31 @@ def test_length_checksum_roundtrip_all_lengths(alphabet_2, keys_2):
         )
 
 
-@pytest.mark.xfail(strict=True, reason="same padding bug, over many seeded length pairs")
+@pytest.mark.parametrize(
+    "encrypter_class",
+    [
+        pytest.param(
+            LengthChecksumEncrypter,
+            id="LengthChecksumEncrypter",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="decrypt emits a byte before testing file_length, so 0 bytes yields 1",
+            ),
+        ),
+        pytest.param(DictionaryEncrypter, id="DictionaryEncrypter"),
+    ],
+)
+def test_empty_plaintext_roundtrip(encrypter_class, alphabet_2, keys_2):
+    """An empty plaintext must decrypt to nothing.
+
+    `decrypt` only compares `num_bytes` against `file_length` *after* yielding, so a declared length
+    of zero still produces one byte. A decrypt-side defect, not an encrypter one.
+    """
+    random.seed(CORRUPTING_SEED)
+    plaintexts = make_plaintexts(EMPTY_CASE)
+    assert roundtrip(encrypter_class, alphabet_2, keys_2, plaintexts) == plaintexts
+
+
 def test_length_checksum_seeded_sweep(alphabet_2, keys_2):
     random.seed(CORRUPTING_SEED)
     rng = random.Random(CORRUPTING_SEED)

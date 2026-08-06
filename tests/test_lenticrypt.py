@@ -19,31 +19,14 @@ from lenticrypt import (
 from .conftest import make_plaintexts
 
 ENCRYPTERS = [Encrypter, LengthChecksumEncrypter, DictionaryEncrypter]
+ENCRYPTER_IDS = [cls.__name__ for cls in ENCRYPTERS]
 
-# LengthChecksumEncrypter corrupts the tail even when the plaintexts are the *same* length:
-# whenever an odd number of single-nibble fallbacks leaves one nibble pending, `peek_nibbles(2)`
-# reports None, the padding policy overwrites that live nibble, and nothing is consumed.
-# See test_regressions.py.
-PADDING_BUG = pytest.mark.xfail(
-    strict=True, reason="LengthChecksumEncrypter pads over a pending real nibble"
-)
-ENCRYPTERS_PARAMS = [
-    pytest.param(
-        cls,
-        id=cls.__name__,
-        marks=PADDING_BUG if cls is LengthChecksumEncrypter else (),
-    )
-    for cls in ENCRYPTERS
-]
-
-
-# Whether a given plaintext size trips the padding bug depends on how many single-nibble fallbacks
-# happen to occur, so these tests sweep several sizes rather than pinning one. A single size would
-# make the xfail below pass or fail by luck.
+# Several sizes, because how many single-nibble fallbacks occur -- and so whether a stray nibble is
+# left pending at the end -- varies with length. A single size let the padding corruption through.
 SIZES = (64, 128, 256, 512)
 
 
-@pytest.mark.parametrize("encrypter_class", ENCRYPTERS_PARAMS)
+@pytest.mark.parametrize("encrypter_class", ENCRYPTERS, ids=ENCRYPTER_IDS)
 def test_equal_length_roundtrip(encrypter_class, alphabet_2, keys_2):
     """Every mode must round-trip equal-length plaintexts.
 
@@ -58,7 +41,7 @@ def test_equal_length_roundtrip(encrypter_class, alphabet_2, keys_2):
             assert actual == expected, f"{size}-byte plaintexts did not round-trip"
 
 
-@pytest.mark.parametrize("encrypter_class", ENCRYPTERS_PARAMS)
+@pytest.mark.parametrize("encrypter_class", ENCRYPTERS, ids=ENCRYPTER_IDS)
 def test_one_ciphertext_yields_different_plaintexts(encrypter_class, alphabet_2, keys_2):
     """The defining property: the same bytes decrypt differently under each key."""
     for size in SIZES:
