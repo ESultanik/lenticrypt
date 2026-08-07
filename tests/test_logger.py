@@ -1,4 +1,4 @@
-"""ColorFormatter output, with and without colour.
+"""ColorFormatter output, with and without color.
 
 This module had no tests, so the placeholder expansion and the INFO special case were unverified.
 """
@@ -24,7 +24,7 @@ def test_info_is_printed_bare():
 
 
 @pytest.mark.parametrize("level", [logging.WARNING, logging.ERROR, logging.CRITICAL, logging.DEBUG])
-def test_other_levels_are_labelled_and_coloured(level):
+def test_other_levels_are_labeled_and_colored(level):
     formatter = ColorFormatter(DEFAULT_FORMAT, use_color=True)
     output = formatter.format(record(level))
     assert logging.getLevelName(level) in output
@@ -35,7 +35,7 @@ def test_other_levels_are_labelled_and_coloured(level):
 @pytest.mark.parametrize(
     "level", [logging.WARNING, logging.ERROR, logging.CRITICAL, logging.DEBUG, logging.INFO]
 )
-def test_no_escapes_when_colour_is_disabled(level):
+def test_no_escapes_when_color_is_disabled(level):
     """Redirected output must stay free of escape sequences."""
     formatter = ColorFormatter(DEFAULT_FORMAT, use_color=False)
     output = formatter.format(record(level))
@@ -45,20 +45,20 @@ def test_no_escapes_when_colour_is_disabled(level):
 
 
 @pytest.mark.parametrize("level", [logging.WARNING, logging.ERROR, logging.CRITICAL])
-def test_level_is_still_named_when_colour_is_disabled(level):
+def test_level_is_still_named_when_color_is_disabled(level):
     """Redirecting stderr used to discard the level entirely, so an ERROR read as ordinary text."""
     formatter = ColorFormatter(DEFAULT_FORMAT, use_color=False)
     assert logging.getLevelName(level) in formatter.format(record(level))
 
 
-def test_info_stays_bare_without_colour():
-    """INFO is conversational at any colour setting."""
+def test_info_stays_bare_without_color():
+    """INFO is conversational at any color setting."""
     formatter = ColorFormatter(DEFAULT_FORMAT, use_color=False)
     assert formatter.format(record(logging.INFO)) == "hello"
 
 
-def test_level_colour_placeholder_is_resolved_per_record():
-    """`$LEVELCOLOR` must become the colour of *this* record's level, not a fixed one."""
+def test_level_color_placeholder_is_resolved_per_record():
+    """`$LEVELCOLOR` must become the color of *this* record's level, not a fixed one."""
     formatter = ColorFormatter(DEFAULT_FORMAT, use_color=True)
     warning = formatter.format(record(logging.WARNING))
     error = formatter.format(record(logging.ERROR))
@@ -76,7 +76,7 @@ def test_multiline_messages_get_continuation_markers():
     assert output.count("\n") >= 2
 
 
-def test_named_colour_placeholders_expand():
+def test_named_color_placeholders_expand():
     assert ansi_color(CGAColors.BLUE) in ColorFormatter.expand("$BLUE")
     assert ColorFormatter.expand("$RESET") == ANSI_RESET
 
