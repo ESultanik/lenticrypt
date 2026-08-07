@@ -14,12 +14,14 @@ import sys
 import pytest
 
 from lenticrypt import (
+    ENCRYPTION_VERSION,
     DictionaryEncrypter,
     LengthChecksumEncrypter,
     decode,
     decrypt,
     find_common_nibble_grams,
 )
+from lenticrypt.exceptions import LenticryptError, UnsupportedVersionError
 from lenticrypt.iowrapper import IOWrapper
 from lenticrypt.progress import ProgressBar
 
@@ -75,17 +77,8 @@ def test_length_checksum_roundtrip_all_lengths(alphabet_2, keys_2):
 
 @pytest.mark.parametrize(
     "encrypter_class",
-    [
-        pytest.param(
-            LengthChecksumEncrypter,
-            id="LengthChecksumEncrypter",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="decrypt emits a byte before testing file_length, so 0 bytes yields 1",
-            ),
-        ),
-        pytest.param(DictionaryEncrypter, id="DictionaryEncrypter"),
-    ],
+    [LengthChecksumEncrypter, DictionaryEncrypter],
+    ids=["LengthChecksumEncrypter", "DictionaryEncrypter"],
 )
 def test_empty_plaintext_roundtrip(encrypter_class, alphabet_2, keys_2):
     """An empty plaintext must decrypt to nothing.
@@ -258,22 +251,46 @@ def test_decode_returns_none_at_eof():
     assert decode(b"") is None
 
 
-@pytest.mark.xfail(strict=True, reason="struct.error escapes; should be a LenticryptError")
-def test_truncated_length_header_raises_cleanly(keys_2):
-    truncated = bytes([0b10000011])
-    with pytest.raises(ValueError) as excinfo:
-        bytes(decrypt(io.BytesIO(truncated), io.BytesIO(keys_2[0])))
-    assert "struct" not in type(excinfo.value).__module__
-
-
-@pytest.mark.xfail(
-    strict=True, reason="`range(decode(stream))` with decode() -> None raises TypeError"
+@pytest.mark.parametrize(
+    "ciphertext",
+    [
+        # A length header with nothing after it: struct.unpack("<Q", ...) on a short buffer.
+        pytest.param(bytes([0b10000011]), id="truncated-length-header"),
+        pytest.param(bytes([0b10000010, 0x00]), id="length-header-then-one-byte"),
+    ],
 )
-def test_truncated_dictionary_raises_cleanly(keys_2):
-    # A v3 length header, then a plausible length, then nothing where the dictionary should be.
-    header = bytes([0b10000000 | 3])
-    with pytest.raises(ValueError):
-        bytes(decrypt(io.BytesIO(header + bytes(40)), io.BytesIO(keys_2[0])))
+def test_malformed_ciphertext_raises_lenticrypt_error(ciphertext, keys_2):
+    """Malformed input must produce a typed error, not a raw stdlib traceback.
+
+    A truncated length header used to surface as `struct.error`.
+    """
+    with pytest.raises(LenticryptError):
+        bytes(decrypt(io.BytesIO(ciphertext), io.BytesIO(keys_2[0])))
+
+
+@pytest.mark.parametrize("encrypter_class", [LengthChecksumEncrypter, DictionaryEncrypter])
+@pytest.mark.parametrize("keep", [0.25, 0.5, 0.75, 0.9])
+def test_truncated_real_ciphertext_raises_cleanly(encrypter_class, keep, alphabet_2, keys_2):
+    """Cutting a genuine ciphertext short must give a typed error rather than a stdlib one.
+
+    Built from real output because a hand-written header is easily *not* malformed -- a declared
+    length of zero, for instance, legitimately decrypts to nothing. Truncating a v3 ciphertext is
+    what exercised `range(decode(stream))` with `decode()` returning None, which raised
+    `TypeError: 'NoneType' object cannot be interpreted as an integer`.
+    """
+    random.seed(CORRUPTING_SEED)
+    plaintexts = make_plaintexts((512, 512))
+    full = bytes(encrypter_class(alphabet_2, [io.BytesIO(p) for p in plaintexts]))
+    truncated = full[: int(len(full) * keep)]
+    with pytest.raises(LenticryptError):
+        bytes(decrypt(io.BytesIO(truncated), io.BytesIO(keys_2[0])))
+
+
+def test_unsupported_version_is_rejected(keys_2):
+    """A newer format version used to warn and then emit garbage; now it refuses."""
+    future = bytes([0b10000000 | (ENCRYPTION_VERSION + 1)]) + bytes(64)
+    with pytest.raises(UnsupportedVersionError):
+        bytes(decrypt(io.BytesIO(future), io.BytesIO(keys_2[0])))
 
 
 def test_empty_ciphertext_yields_nothing(keys_2):
@@ -290,3 +307,21 @@ def test_progress_bar_renders():
     bar = ProgressBar(max_value=10, stream=stream)
     bar.update(5, "Halfway")
     assert "Halfway" in stream.getvalue()
+
+
+@pytest.mark.parametrize("keep", [0.3, 0.6, 0.9])
+def test_truncated_gzip_envelope_raises_cleanly(keep, alphabet_2, keys_2):
+    """A damaged compression envelope must read as a damaged ciphertext.
+
+    Truncating the gzip stream surfaced an `EOFError` traceback from inside gzip, which for a CLI is
+    indistinguishable from a crash.
+    """
+    import gzip as gzip_module
+
+    random.seed(CORRUPTING_SEED)
+    plaintexts = make_plaintexts((512, 512))
+    full = gzip_module.compress(
+        bytes(DictionaryEncrypter(alphabet_2, [io.BytesIO(p) for p in plaintexts]))
+    )
+    with pytest.raises(LenticryptError):
+        bytes(decrypt(io.BytesIO(full[: int(len(full) * keep)]), io.BytesIO(keys_2[0])))

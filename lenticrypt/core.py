@@ -1,15 +1,34 @@
 import array
+import gzip
 import itertools
 import logging
 import random
 import struct
+import zlib
 
 from collections import defaultdict
 from io import BytesIO
-from typing import Any, BinaryIO, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    BinaryIO,
+    Callable,
+    Dict,
+    Generator,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 from .__about__ import __version__
-from .exceptions import EncodingError, LenticryptError
+from .exceptions import (
+    EncodingError,
+    LenticryptError,
+    MalformedCiphertextError,
+    UnsupportedVersionError,
+)
 from .iowrapper import get_length, IOWrappable, IOWrapper
 from .utils import FrozenDict
 
@@ -526,136 +545,218 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
 
 index_type_map = FrozenDict({1: "B", 2: "H", 4: "L", 8: "Q"})
 
+# Byte lengths the block header can encode an offset in.
+VALID_INDEX_BYTES = frozenset(index_type_map)
 
-def _decrypt_dictionary(stream, file_length, cert):
-    # read the dictionary index:
-    dictionary_length = decode(stream)
-    dictionary = []
-    for i in range(dictionary_length):
-        index = decode(stream)
-        b = stream.read(1)
-        if len(b) < 1:
-            raise Exception("Unexpected end of file while decoding dictionary!")
-        length = b[0]
-        dictionary.append((index, length))
-    last_nibble = None
-    num_bytes = 0
-    while num_bytes < file_length:
-        dict_index = decode(stream)
-        if dict_index >= len(dictionary):
-            raise Exception(
-                f"Invalid dictionary index {dict_index}!  Maximum valid index is {len(dictionary) - 1}."
-            )
-        index, length = dictionary[dict_index]
-        if length == 1:
-            if last_nibble is None:
-                last_nibble = cert[index] << 4
+
+class _NibbleAssembler:
+    """Reassembles a plaintext from nibbles, honouring the declared length.
+
+    A single place that owns the half-byte carry and the `file_length` bound. There were four
+    near-identical copies of this carry logic, and the one in `_decrypt_dictionary` checked the
+    length bound only between blocks -- so a final multi-nibble block could overshoot, and an empty
+    plaintext still produced one byte.
+    """
+
+    def __init__(self, file_length: int | None = None):
+        self.file_length = file_length
+        self.num_bytes = 0
+        self._pending: int | None = None
+
+    @property
+    def complete(self) -> bool:
+        return self.file_length is not None and self.num_bytes >= self.file_length
+
+    def push(self, nibbles: Sequence[int]) -> Iterator[int]:
+        """Emits whole bytes assembled from `nibbles`, stopping at the declared length."""
+        for nibble in nibbles:
+            if self.complete:
+                return
+            if self._pending is None:
+                self._pending = nibble << 4
             else:
-                yield last_nibble | cert[index]
-                last_nibble = None
-                num_bytes += 1
-        else:
-            nibbles = cert[index : index + length]
-            if last_nibble is not None:
-                yield last_nibble | nibbles[0]
-                num_bytes += 1
-                last_nibble = nibbles[-1] << 4
-                nibbles = nibbles[1:-1]
-            for index in range(0, len(nibbles), 2):
-                yield (nibbles[index] << 4) | nibbles[index + 1]
-                num_bytes += 1
+                yield self._pending | nibble
+                self._pending = None
+                self.num_bytes += 1
+
+    def flush(self) -> Iterator[int]:
+        """Emits a trailing half byte, if the plaintext length calls for one."""
+        if self._pending is not None and not self.complete:
+            yield self._pending
+            self.num_bytes += 1
+            self._pending = None
+
+
+def _load_certificate(certificate: IOWrappable) -> bytearray:
+    """Expands a certificate into one nibble per element.
+
+    Reads in blocks rather than a byte at a time, which for a multi-megabyte certificate was
+    O(n) Python iterations to do what two C-level calls can.
+    """
+    nibbles = bytearray()
+    with IOWrapper(certificate) as stream:
+        while True:
+            block = stream.read(READ_BLOCK_BYTES)
+            if not block:
+                break
+            for byte in block:
+                nibbles.append((byte & 0b11110000) >> 4)
+                nibbles.append(byte & 0b00001111)
+    return nibbles
+
+
+def _certificate_nibbles(cert: Sequence[int], index: int, length: int) -> Sequence[int]:
+    """The `length` nibbles at `index`, or zeros if the ciphertext points outside the certificate.
+
+    Also covers the truncated-slice case: `cert[index:index + length]` silently returns fewer
+    elements near the end, which `_decrypt_dictionary` then indexed past the end of.
+    """
+    if index < 0 or index >= len(cert):
+        logger.warning(
+            f"Decrypted invalid certificate index {index} "
+            f"(maximum value is {len(cert) - 1}); substituting zeros"
+        )
+        return bytes(length)
+    nibbles = cert[index : index + length]
+    if len(nibbles) < length:
+        logger.warning(
+            f"Certificate index {index} has only {len(nibbles)} of {length} nibbles; padding"
+        )
+        return bytes(nibbles) + bytes(length - len(nibbles))
+    return nibbles
+
+
+def _read_exactly(stream, count: int, what: str) -> bytes:
+    """Reads exactly `count` bytes or raises, so truncation cannot surface as a struct.error."""
+    data = stream.read(count)
+    if len(data) < count:
+        message = f"Unexpected end of ciphertext while reading {what}"
+        raise MalformedCiphertextError(message)
+    return data
+
+
+def _read_dictionary(stream) -> list[tuple[int, int]]:
+    """Reads the v3 dictionary header: one (certificate offset, gram length) pair per entry."""
+    dictionary_length = decode(stream)
+    if dictionary_length is None:
+        message = "Unexpected end of ciphertext while reading the dictionary size"
+        raise MalformedCiphertextError(message)
+    dictionary = []
+    for _entry in range(dictionary_length):
+        index = decode(stream)
+        if index is None:
+            message = "Unexpected end of ciphertext while reading a dictionary entry"
+            raise MalformedCiphertextError(message)
+        dictionary.append((index, _read_exactly(stream, 1, "a dictionary entry length")[0]))
+    return dictionary
+
+
+def _decrypt_dictionary(
+    stream, assembler: "_NibbleAssembler", cert: Sequence[int]
+) -> Iterator[int]:
+    """Decrypts a version 3 body, whose blocks are indices into a dictionary in the header."""
+    dictionary = _read_dictionary(stream)
+    while not assembler.complete:
+        dict_index = decode(stream)
+        if dict_index is None:
+            message = "Unexpected end of ciphertext before the plaintext was complete"
+            raise MalformedCiphertextError(message)
+        if dict_index >= len(dictionary):
+            message = (
+                f"Invalid dictionary index {dict_index}; "
+                f"the maximum valid index is {len(dictionary) - 1}"
+            )
+            raise MalformedCiphertextError(message)
+        index, length = dictionary[dict_index]
+        yield from assembler.push(_certificate_nibbles(cert, index, length))
+    yield from assembler.flush()
+
+
+def _read_block_header(header: int) -> tuple[int, int]:
+    """Splits an indexed-gram block header into `(gram length, index width in bytes)`."""
+    index_bytes = (header & 0b00000111) + 1
+    if index_bytes not in VALID_INDEX_BYTES:
+        message = f"Invalid block header: index byte length of {index_bytes} is not valid"
+        raise MalformedCiphertextError(message)
+    return ((header >> 3) & 0b00001111) + 1, index_bytes
+
+
+def _decrypt_blocks(stream, cert: Sequence[int], assembler: "_NibbleAssembler") -> Iterator[int]:
+    """Decrypts indexed-gram blocks, and dispatches to the dictionary body on a length header."""
+    while not assembler.complete:
+        header = stream.read(1)
+        if not header:
+            break
+        if header[0] & 0b10000000:
+            version = header[0] & 0b01111111
+            logger.info(f"Found length header. File format version is {version}")
+            if version > ENCRYPTION_VERSION:
+                message = (
+                    f"This ciphertext declares file format version {version}, but this build "
+                    f"understands at most version {ENCRYPTION_VERSION}"
+                )
+                raise UnsupportedVersionError(message)
+            # The next 8 encrypted bytes are the plaintext length, encoded as blocks themselves.
+            raw_length = bytes(_decrypt_blocks(stream, cert, _NibbleAssembler(file_length=8)))
+            if len(raw_length) < 8:
+                message = "Unexpected end of ciphertext while reading the plaintext length"
+                raise MalformedCiphertextError(message)
+            assembler.file_length = struct.unpack("<Q", raw_length)[0]
+            logger.info(f"Plaintext file length is {assembler.file_length} bytes")
+            if version == 3:
+                yield from _decrypt_dictionary(stream, assembler, cert)
+                return
+            continue
+        length, index_bytes = _read_block_header(header[0])
+        index = stream.read(index_bytes)
+        if len(index) < index_bytes:
+            break
+        offset = struct.unpack("<" + index_type_map[index_bytes], index)[0]
+        yield from assembler.push(_certificate_nibbles(cert, offset, length))
+    yield from assembler.flush()
+    if assembler.file_length is not None and not assembler.complete:
+        # The ciphertext declared a length it did not deliver. Returning the short plaintext
+        # silently would hand back a truncated file as though it were the whole thing.
+        message = (
+            f"Ciphertext ended after {assembler.num_bytes} bytes, but declares a plaintext of "
+            f"{assembler.file_length} bytes"
+        )
+        raise MalformedCiphertextError(message)
 
 
 def decrypt(
     ciphertext: IOWrappable,
-    certificate: Optional[IOWrappable],
-    cert: Optional[bytearray] = None,
-    file_length: Optional[int] = None,
+    certificate: IOWrappable | None = None,
+    *,
+    cert: Sequence[int] | None = None,
 ) -> Generator[int, None, None]:
-    # the file format is specified in a comment at the top of the encrypt(...) function above.
+    """Decrypts `ciphertext` with `certificate`, yielding the plaintext one byte at a time.
+
+    Args:
+        ciphertext: The ciphertext, as a path, stream, bytes, or iterable of ints.
+        certificate: The secret to decrypt with. Ignored if `cert` is given.
+        cert: A pre-expanded certificate, one nibble per element, to avoid re-expanding it across
+            repeated calls.
+
+    Yields:
+        Successive plaintext bytes.
+
+    Raises:
+        MalformedCiphertextError: The ciphertext is truncated or internally inconsistent.
+        UnsupportedVersionError: The ciphertext declares a file format this build cannot read.
+    """
     if cert is None:
-        cert = bytearray()
-        with IOWrapper(certificate) as stream:
-            while True:
-                b = stream.read(1)
-                if not b:
-                    break
-                b = b[0] & 0b11111111
-                cert.append((b & 0b11110000) >> 4)
-                cert.append(b & 0b00001111)
+        if certificate is None:
+            message = "decrypt() needs either a certificate or a pre-expanded cert"
+            raise LenticryptError(message)
+        cert = _load_certificate(certificate)
     with IOWrapper(ciphertext) as stream:
-        last_nibble = None
-        num_bytes = 0
-        while True:
-            header = stream.read(1)
-            if not header:
-                break
-            header = struct.unpack("<B", header)[0]
-            is_length_header = header & 0b10000000
-            if is_length_header:
-                version = header & 0b01111111
-                logger.info(f"Found length header. File format version is {version}")
-                if version > ENCRYPTION_VERSION:
-                    logger.warning(
-                        f"This ciphertext appears to have been encrypted with a newer version of the cryptosystem (version {(version / 10.0)!s})."
-                    )
-                # the next 8 encrypted bytes encode the length of the plaintext
-                raw_length = bytearray(decrypt(stream, None, cert=cert, file_length=8))
-                file_length = struct.unpack("<Q", raw_length)[0]
-                logger.info(f"Plaintext file length is {file_length} bytes")
-                if version == 3:
-                    yield from _decrypt_dictionary(stream, file_length, cert)
-                    return
-                continue
-            index_bytes = (header & 0b00000111) + 1
-            if index_bytes not in index_type_map:
-                raise Exception(
-                    f"Invalid block header: Received an invalid index byte length of {index_bytes!s} bytes!"
-                )
-            length = ((header >> 3) & 0b00001111) + 1
-            index = stream.read(index_bytes)
-            if not index:
-                break
-            n = struct.unpack("<" + index_type_map[index_bytes], index)[0]
-            if n >= len(cert):
-                logger.warning(
-                    f"Decrypted invalid certificate index {n} (maximum value is {len(cert) - 1})"
-                )
-                if last_nibble is not None:
-                    yield last_nibble
-                    num_bytes += 1
-                    if file_length is not None and num_bytes >= file_length:
-                        return
-                    last_nibble = None
-                    length -= 1
-                for i in range(length):
-                    yield 0
-                    num_bytes += 1
-                    if file_length is not None and num_bytes >= file_length:
-                        return
-            elif length == 1:
-                if last_nibble is None:
-                    last_nibble = cert[n] << 4
-                else:
-                    yield last_nibble | cert[n]
-                    last_nibble = None
-                    num_bytes += 1
-                    if file_length is not None and num_bytes >= file_length:
-                        return
-            else:
-                nibbles = cert[n : n + length]
-                if last_nibble is not None:
-                    yield last_nibble | nibbles[0]
-                    num_bytes += 1
-                    last_nibble = None
-                    nibbles = nibbles[1:]
-                    if file_length is not None and num_bytes >= file_length:
-                        return
-                for index in range(0, len(nibbles), 2):
-                    if index == len(nibbles) - 1:
-                        last_nibble = nibbles[index] << 4
-                    else:
-                        yield (nibbles[index] << 4) | nibbles[index + 1]
-                        num_bytes += 1
-                        if file_length is not None and num_bytes >= file_length:
-                            return
+        try:
+            yield from _decrypt_blocks(stream, cert, _NibbleAssembler())
+        except (EOFError, gzip.BadGzipFile, zlib.error) as error:
+            # A damaged compression envelope is still a damaged ciphertext, and should read as one
+            # rather than as an `EOFError` traceback from deep inside gzip. Caught narrowly on
+            # purpose: a generic OSError here could be a real disk failure, which must not be
+            # relabelled as malformed input.
+            message = f"The ciphertext is not readable: {error}"
+            raise MalformedCiphertextError(message) from error
