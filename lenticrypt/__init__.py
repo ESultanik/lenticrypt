@@ -19,8 +19,12 @@ from .core import (
     find_common_nibble_grams,
     index_type_map,
     is_power2,
+    nibbles_of,
+    pack_grams,
     read_nibble_grams,
     read_nibbles,
+    select_nibble_gram_lengths,
+    unpack_gram_length,
 )
 
 __all__ = [
@@ -43,7 +47,11 @@ __all__ = [
     "find_common_nibble_grams",
     "index_type_map",
     "is_power2",
+    "nibbles_of",
+    "pack_grams",
     "read_nibble_grams",
     "read_nibbles",
+    "select_nibble_gram_lengths",
+    "unpack_gram_length",
     "utils",
 ]

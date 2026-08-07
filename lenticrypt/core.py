@@ -51,11 +51,26 @@ __all__ = [
     "find_common_nibble_grams",
     "index_type_map",
     "is_power2",
+    "nibbles_of",
+    "pack_grams",
+    "select_nibble_gram_lengths",
+    "unpack_gram_length",
     "read_nibble_grams",
     "read_nibbles",
 ]
 
 logger = logging.getLogger(name="lenticrypt")
+
+# The block header allocates four bits to `length - 1`, so longer grams cannot be encoded.
+MAX_NIBBLE_GRAM_LENGTH = 16
+
+# Certificate offsets are stored as unsigned 32-bit ints. `array('L')` is *native* width -- 8 bytes
+# here, 4 on Windows -- so it was both platform-dependent and twice the size needed. Note the 'L' in
+# `index_type_map` is correct as-is: struct's `<` prefix selects standard sizes, where L is always 4.
+OFFSET_TYPECODE = "I"
+
+# Report progress every 1024 offsets rather than on every one.
+PROGRESS_MASK = 0x3FF
 
 # The version of the ciphertext file format, independent of the package version: bumping one does
 # not imply bumping the other. Prior releases conflated them by encoding this as the semver minor.
@@ -71,65 +86,149 @@ def is_power2(num):
     return num != 0 and ((num & (num - 1)) == 0)
 
 
+# Translation tables that map a byte to its high and low nibble, so a whole buffer can be expanded
+# with two C-level `bytes.translate` calls instead of a per-byte Python loop.
+_HIGH_NIBBLES = bytes(b >> 4 for b in range(256))
+_LOW_NIBBLES = bytes(b & 0x0F for b in range(256))
+
+
+def nibbles_of(data: bytes) -> bytes:
+    """Expands `data` into one nibble per byte, high nibble first."""
+    expanded = bytearray(len(data) * 2)
+    expanded[0::2] = data.translate(_HIGH_NIBBLES)
+    expanded[1::2] = data.translate(_LOW_NIBBLES)
+    return bytes(expanded)
+
+
 def read_nibbles(byte_array: Sequence[int]) -> Generator[int, None, None]:
-    for b in byte_array:
-        yield (b & 0b11110000) >> 4
-        yield b & 0b00001111
+    yield from nibbles_of(bytes(byte_array))
 
 
 NibbleGramTypeHint = Generator[bytes, None, None]
 
 
 def read_nibble_grams(byte_array: Sequence[int], length: int = 1) -> NibbleGramTypeHint:
+    """Yields every `length`-nibble window of `byte_array`, one nibble apart."""
     if not is_power2(length):
-        raise ValueError(f"length must be a power of two; received {length}")
-
-    return (
-        bytes(ng)
-        for ng in zip(
-            *(
-                itertools.islice(nibbles, i, None)
-                for i, nibbles in enumerate(itertools.tee(read_nibbles(byte_array), length))
-            )
-        )
-    )
+        message = f"length must be a power of two; received {length}"
+        raise ValueError(message)
+    nibbles = nibbles_of(bytes(byte_array))
+    return (nibbles[i : i + length] for i in range(len(nibbles) - length + 1))
 
 
-NibbleGramsTypeHint = Dict[Tuple[bytes, ...], array.array]
+# The index maps a *packed* gram key to the certificate offsets where it occurs. The key interleaves
+# the certificates' nibbles -- key[j::num_secrets] is certificate j's gram -- so it can be produced
+# by a single slice of one interleaved buffer, rather than one slice per certificate plus a concat.
+# Measured ~2.2x faster to build than concatenation, at the same memory.
+NibbleGramsTypeHint = Dict[bytes, array.array]
 CommonNibbleGramsTypeHint = Dict[int, NibbleGramsTypeHint]
+
+# A length is worth indexing if its keyspace is small in absolute terms...
+ABSOLUTE_CHEAP_KEYSPACE = 1 << 16
+# ...or if the certificates supply enough offsets to populate a useful fraction of it.
+MIN_OFFSETS_PER_KEY = 2
+
+
+def pack_grams(grams: Sequence[bytes]) -> bytes:
+    """Packs one gram per certificate into a single index key, matching the interleaved layout."""
+    # strict: every certificate must contribute a gram of the same length, by construction.
+    return bytes(itertools.chain.from_iterable(zip(*grams, strict=True)))
+
+
+def unpack_gram_length(key: bytes, num_secrets: int) -> int:
+    """The nibble-gram length a packed key represents."""
+    return len(key) // num_secrets
+
+
+def select_nibble_gram_lengths(
+    min_cert_length: int, num_secrets: int, max_length: int = MAX_NIBBLE_GRAM_LENGTH
+) -> Tuple[int, ...]:
+    """Chooses which nibble-gram lengths are worth indexing for these certificates.
+
+    A length-L hit needs the grams from *every* certificate to match at the same offset, so the
+    keyspace is 16**(L*num_secrets) while the certificates supply only 2*min_cert_length offsets.
+    Past a point the index is one unique key per offset: pure memory, never a hit. Measured with two
+    256 KiB certificates, lengths 4, 8 and 16 held 1.57M keys between them, none reused, and were
+    used for 0% of blocks -- roughly 75% of the index for nothing.
+
+    Length 1 is always included; without it no byte can be encoded at all.
+    """
+    offsets = 2 * min_cert_length
+    lengths = []
+    for length in (1, 2, 4, 8, 16):
+        if length > max_length:
+            break
+        keyspace = 16 ** (length * num_secrets)
+        cheap = keyspace <= ABSOLUTE_CHEAP_KEYSPACE
+        useful = offsets >= MIN_OFFSETS_PER_KEY * keyspace
+        if length == 1 or cheap or useful:
+            lengths.append(length)
+        else:
+            # Longer grams only have larger keyspaces, so nothing after this qualifies either.
+            break
+    return tuple(lengths)
 
 
 def find_common_nibble_grams(
     certificates: Sequence[Sequence[int]],
-    nibble_gram_lengths=(1, 2, 4, 8, 16),
+    nibble_gram_lengths: Optional[Sequence[int]] = None,
     status_callback: StatusCallbackTypeHint = None,
     stop_when_sufficient: bool = False,
 ) -> CommonNibbleGramsTypeHint:
-    all_nibbles: CommonNibbleGramsTypeHint = {}  # maps a nibble value to a common index
+    """Indexes the offsets at which the certificates share each nibble-gram combination.
+
+    Args:
+        certificates: The secrets to index.
+        nibble_gram_lengths: Lengths to index. Defaults to `select_nibble_gram_lengths`, which drops
+            lengths too long to ever be hit for these certificates.
+        status_callback: Progress reporter.
+        stop_when_sufficient: Stop indexing a length once every combination has been seen.
+
+    Returns:
+        A mapping of nibble-gram length to a mapping of packed gram key to certificate offsets.
+    """
+    num_secrets = len(certificates)
     min_cert_length = min(len(c) for c in certificates)
+    if nibble_gram_lengths is None:
+        nibble_gram_lengths = select_nibble_gram_lengths(min_cert_length, num_secrets)
+    expanded = [nibbles_of(bytes(c)) for c in certificates]
+    total_nibbles = min(len(n) for n in expanded)
+    # One interleaved buffer, so a gram key is a single slice. Transient: 2*num_secrets*cert_size,
+    # which is megabytes next to an index measured in gigabytes.
+    interleaved = bytearray(total_nibbles * num_secrets)
+    for secret, nibbles in enumerate(expanded):
+        interleaved[secret::num_secrets] = nibbles[:total_nibbles]
+    interleaved = bytes(interleaved)
+    del expanded
+
+    all_nibbles: CommonNibbleGramsTypeHint = {}
     for nibble_gram_length in nibble_gram_lengths:
-        nibbles: NibbleGramsTypeHint = defaultdict(lambda: array.array("L"))
-        all_nibbles[nibble_gram_length] = nibbles
-        range_max = min_cert_length * 2 - nibble_gram_length + 1
-        for index, pair in enumerate(
-            zip(*(read_nibble_grams(c, nibble_gram_length) for c in certificates))
-        ):
-            nibbles[pair].append(index)
-            if stop_when_sufficient and len(nibbles) >= (16 * nibble_gram_length) ** len(
-                certificates
-            ):
-                return all_nibbles
-            if status_callback is not None:
+        nibbles_index: NibbleGramsTypeHint = {}
+        all_nibbles[nibble_gram_length] = nibbles_index
+        # 16**(L*N) is the true number of distinct combinations; the previous
+        # `(16*L)**N` was correct only for L=1, by coincidence.
+        sufficient = 16 ** (nibble_gram_length * num_secrets)
+        width = nibble_gram_length * num_secrets
+        range_max = total_nibbles - nibble_gram_length + 1
+        for index in range(range_max):
+            start = index * num_secrets
+            key = interleaved[start : start + width]
+            offsets = nibbles_index.get(key)
+            if offsets is None:
+                nibbles_index[key] = offsets = array.array(OFFSET_TYPECODE)
+            offsets.append(index)
+            if stop_when_sufficient and len(nibbles_index) >= sufficient:
+                break
+            # Throttled: this used to fire once per nibble offset, i.e. millions of Python calls
+            # plus float arithmetic, all of it invisible work when nothing is watching.
+            if status_callback is not None and not index & PROGRESS_MASK:
                 status_callback(
-                    index, range_max, "Building Index for %s-nibble-grams" % nibble_gram_length
+                    index, range_max, f"Building Index for {nibble_gram_length}-nibble-grams"
                 )
     return all_nibbles
 
 
 READ_BLOCK_BYTES = 4096
-
-# The block header allocates four bits to `length - 1`, so grams longer than this cannot be encoded.
-MAX_NIBBLE_GRAM_LENGTH = 16
 
 # Distinct unencodable gram tuples to name in the log before falling back to a bare count.
 MAX_REPORTED_UNENCODABLE = 16
@@ -268,11 +367,11 @@ class Encrypter(object):
 
     def can_encode(self, grams: Tuple[bytes, ...], length: int) -> bool:
         """Whether this gram tuple can be represented as a ciphertext block."""
-        return grams in self.substitution_alphabet[length]
+        return pack_grams(grams) in self.substitution_alphabet[length]
 
     def encode_block(self, grams: Tuple[bytes, ...], length: int) -> bytes:
         """Encodes one accepted gram tuple as a ciphertext block."""
-        index = random.choice(self.substitution_alphabet[length][grams])
+        index = random.choice(self.substitution_alphabet[length][pack_grams(grams)])
         if index < 256:
             index_bytes, index_type = 1, "B"  # unsigned char
         elif index < 65536:
@@ -414,9 +513,10 @@ def encode(n: int) -> bytearray:
             return ret
         n >>= 8
         ret = bytearray([n & 0b11111111]) + ret
-    raise Exception(
-        f"Integer {orig_n} is too big to encode!  The biggest value supported is {MAX_ENCODE_VALUE}."
+    message = (
+        f"Integer {orig_n} is too big to encode; the largest supported value is {MAX_ENCODE_VALUE}"
     )
+    raise EncodingError(message)
 
 
 def decode(byte_array: Union[bytes, bytearray, BinaryIO]) -> Optional[int]:
@@ -456,7 +556,8 @@ def decode(byte_array: Union[bytes, bytearray, BinaryIO]) -> Optional[int]:
             n <<= 8
             raw_byte = byte_array.read(1)
             if len(raw_byte) < 1:
-                raise Exception("Error: expected another byte in the stream!")
+                message = "Unexpected end of stream while decoding a variable-width integer"
+                raise MalformedCiphertextError(message)
             byte = raw_byte[0]
             n |= byte
         return n
@@ -469,8 +570,8 @@ def decode(byte_array: Union[bytes, bytearray, BinaryIO]) -> Optional[int]:
 class DictionaryEncrypter(LengthChecksumEncrypter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.dictionary: Dict[Tuple[bytes, ...], int] = {}
-        self.dictionary_items: List[Tuple[bytes, ...]] = []
+        self.dictionary: Dict[bytes, int] = {}
+        self.dictionary_items: List[bytes] = []
         # `can_encode` consults the substitution alphabet while building and the dictionary
         # afterwards; an explicit flag rather than testing the dictionary for emptiness.
         self._dictionary_built = False
@@ -488,9 +589,10 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
         exactly the `-f/--force-encrypt` case.
         """
         readers = [BufferedNibbleGramReader(stream) for stream in self.to_encrypt]
-        hits: Dict[Tuple[bytes, ...], int] = {}
+        hits: Dict[bytes, int] = {}
         for _length, grams in self.consume_grams(readers, "Building Dictionary"):
-            hits[grams] = hits.get(grams, 0) + 1
+            key = pack_grams(grams)
+            hits[key] = hits.get(key, 0) + 1
         # Every single-nibble gram the secrets can encode needs an entry, so encryption can always
         # fall back to length 1. Weight 0 keeps observed grams ahead of these fillers.
         #
@@ -500,11 +602,10 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
         # IndexError on [0]. Iterated lazily rather than materialised as a set: 16**n is 16.7M
         # tuples for 6 secrets.
         encodable_single_grams = self.substitution_alphabet.get(1, {})
-        for gram in itertools.product(
-            *([bytes([nibble]) for nibble in range(16)] for _ in range(len(self.to_encrypt)))
-        ):
-            if gram not in hits and gram in encodable_single_grams:
-                hits[gram] = 0
+        for combination in itertools.product(range(16), repeat=len(self.to_encrypt)):
+            key = bytes(combination)
+            if key not in hits and key in encodable_single_grams:
+                hits[key] = 0
         # Sorted over the mapping rather than a set difference: iteration order of a set of tuples
         # of `bytes` varies with PYTHONHASHSEED, so dictionary indices differed between runs and
         # defeated `--seed` reproducibility. The gram itself breaks ties deterministically.
@@ -518,18 +619,18 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
         # While encrypting, the dictionary is the authority; while building it, the base class's
         # substitution-alphabet check is used instead.
         if self._dictionary_built:
-            return grams in self.dictionary
+            return pack_grams(grams) in self.dictionary
         return super().can_encode(grams, length)
 
     def encode_block(self, grams: Tuple[bytes, ...], length: int) -> bytes:
-        return encode(self.dictionary[grams])
+        return encode(self.dictionary[pack_grams(grams)])
 
     def get_header(self):
         yield from super().get_header()
         # The dictionary itself: one (certificate offset, gram length) pair per entry.
         yield from iter(encode(len(self.dictionary)))
         for grams in self.dictionary_items:
-            gram_length = len(grams[0])
+            gram_length = unpack_gram_length(grams, len(self.to_encrypt))
             # An explicit check rather than `assert`, which vanishes under -O. build_dictionary only
             # admits grams the alphabet can encode, so reaching this is a bug, not bad input.
             offsets = self.substitution_alphabet.get(gram_length, {}).get(grams)
