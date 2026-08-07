@@ -20,6 +20,7 @@ from lenticrypt import (
     decode,
     decrypt,
     find_common_nibble_grams,
+    unpack_gram_length,
 )
 from lenticrypt.exceptions import LenticryptError, UnsupportedVersionError
 from lenticrypt.iowrapper import IOWrapper
@@ -161,8 +162,8 @@ def test_dictionary_header_survives_unencodable_grams(weak_keys):
     encrypter = DictionaryEncrypter(alphabet, plaintexts)
     assert bytes(encrypter.get_header())
     # Only grams the alphabet can actually encode may enter the dictionary.
-    for grams in encrypter.dictionary_items:
-        assert grams in alphabet[len(grams[0])]
+    for key in encrypter.dictionary_items:
+        assert key in alphabet[unpack_gram_length(key, 2)]
 
 
 def test_seeded_encryption_is_reproducible(alphabet_2):
@@ -216,7 +217,7 @@ def test_missing_combinations_uses_the_alphabet_key_shape(keys_2, weak_keys):
     assert missing_combinations(find_common_nibble_grams(keys_2, nibble_gram_lengths=(1,)), 2) == []
     missing = missing_combinations(find_common_nibble_grams(weak_keys, nibble_gram_lengths=(1,)), 2)
     assert len(missing) == 255, "weak keys cover only the all-zero gram"
-    assert all(isinstance(part, bytes) for gram in missing for part in gram)
+    assert all(isinstance(key, bytes) and len(key) == 2 for key in missing)
 
 
 # --------------------------------------------------------------------------------------------------

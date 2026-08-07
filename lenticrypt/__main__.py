@@ -17,6 +17,7 @@ from .core import (
     LengthChecksumEncrypter,
     decrypt,
     find_common_nibble_grams,
+    select_nibble_gram_lengths,
 )
 from .exceptions import LenticryptError
 from .iowrapper import auto_unzip
@@ -217,16 +218,15 @@ def missing_combinations(substitution_alphabet: dict, num_secrets: int) -> list[
     """
     single_grams = substitution_alphabet.get(1, {})
     return [
-        gram
-        for gram in (
-            tuple(bytes([nibble]) for nibble in combination)
-            for combination in itertools.product(range(16), repeat=num_secrets)
+        key
+        for key in (
+            bytes(combination) for combination in itertools.product(range(16), repeat=num_secrets)
         )
-        if gram not in single_grams
+        if key not in single_grams
     ]
 
 
-def _format_missing(missing: Sequence[tuple[bytes, ...]]) -> str:
+def _format_missing(missing: Sequence[bytes]) -> str:
     """Renders missing combinations as hex nibbles.
 
     Previously rendered with `chr()` of values 0-15, i.e. control characters, and accumulated by
@@ -237,8 +237,8 @@ def _format_missing(missing: Sequence[tuple[bytes, ...]]) -> str:
         f"{len(missing)} missing nibble combination(s):",
     ]
     lines.extend(
-        "  " + " ".join(f"0x{byte[0]:x}" for byte in gram)
-        for gram in missing[:MAX_REPORTED_COMBINATIONS]
+        "  " + " ".join(f"0x{nibble:x}" for nibble in key)
+        for key in missing[:MAX_REPORTED_COMBINATIONS]
     )
     if len(missing) > MAX_REPORTED_COMBINATIONS:
         lines.append(f"  ...and {len(missing) - MAX_REPORTED_COMBINATIONS} more")
@@ -254,7 +254,10 @@ def do_version(_args: argparse.Namespace, outfile: BinaryIO) -> int:
 
 def do_encrypt(args: argparse.Namespace, outfile: BinaryIO) -> int:
     secrets = tuple(Path(secret).read_bytes() for secret, _plaintext in args.encrypt)
-    lengths = NIBBLE_GRAM_LENGTHS[: args.level]
+    # The level caps how far up the ladder we go; the adaptive choice drops lengths that these
+    # particular secrets are too short to ever hit, which is most of them at realistic key sizes.
+    lengths = select_nibble_gram_lengths(min(map(len, secrets)), len(secrets))[: args.level]
+    logger.info(f"Indexing nibble-gram lengths {lengths}")
     with contextlib.ExitStack() as stack:
         callback = _progress_callback(args)
         if callback is not None:
