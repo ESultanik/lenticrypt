@@ -33,10 +33,7 @@ def main(argv=None) -> int:
 
     parser.add_argument("-f", "--force-encrypt", action="store_true", default=False,
                         help="force encryption, even if the secrets have insufficient entropy to correctly encrypt the plaintexts")
-    default_output = sys.stdout
-    if hasattr(default_output, 'buffer'):
-        # when running from unit tests, `sys.stdout` is a `FlushingStringIO` which has no `buffer` attribute
-        default_output = default_output.buffer
+    default_output = getattr(sys.stdout, 'buffer', sys.stdout)
     parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('wb'), default=default_output,
                         help="the output file (default to stdout)")
     mode_group = parser.add_mutually_exclusive_group()
@@ -170,8 +167,14 @@ def main(argv=None) -> int:
             for e in args.encrypt:
                 for encrypt_file in e:
                     encrypt_file.close()
-        if args.outfile:
-            if args.outfile != sys.stdout:
+        if args.outfile is not None:
+            # Only close streams we opened. `default_output` is `sys.stdout.buffer`, which the
+            # previous `!= sys.stdout` guard never matched -- closing it discarded any output still
+            # buffered in the enclosing TextIOWrapper (making `--version` print nothing) and left
+            # stdout unusable for the rest of the process.
+            if args.outfile is default_output:
+                args.outfile.flush()
+            else:
                 args.outfile.close()
         if args.test:
             for test_file in args.test:
