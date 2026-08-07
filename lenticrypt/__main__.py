@@ -15,7 +15,7 @@ from .core import (
     DictionaryEncrypter,
     Encrypter,
     LengthChecksumEncrypter,
-    decrypt,
+    decrypt_chunks,
     find_common_nibble_grams,
     select_nibble_gram_lengths,
 )
@@ -290,7 +290,11 @@ def do_encrypt(args: argparse.Namespace, outfile: BinaryIO) -> int:
         plaintexts = tuple(
             stack.enter_context(Path(plaintext).open("rb")) for _secret, plaintext in args.encrypt
         )
-        zipfile.write(bytes(encrypter(substitution_alphabet, plaintexts, status_callback=callback)))
+        # Written as it is produced, so peak memory does not scale with the ciphertext.
+        for chunk in encrypter(
+            substitution_alphabet, plaintexts, status_callback=callback
+        ).chunks():
+            zipfile.write(chunk)
     return 0
 
 
@@ -299,7 +303,8 @@ def do_decrypt(args: argparse.Namespace, outfile: BinaryIO) -> int:
     # auto_unzip accepts plain as well as gzipped ciphertexts; the previous `gzip.GzipFile(...)`
     # raised an uncaught BadGzipFile traceback at the user for anything not gzipped.
     with auto_unzip(ciphertext_path) as ciphertext, Path(secret_path).open("rb") as secret:
-        outfile.write(bytes(decrypt(ciphertext, secret)))
+        for chunk in decrypt_chunks(ciphertext, secret):
+            outfile.write(chunk)
     return 0
 
 

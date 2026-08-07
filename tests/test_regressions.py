@@ -160,7 +160,7 @@ def test_dictionary_header_survives_unencodable_grams(weak_keys):
     alphabet = find_common_nibble_grams(weak_keys)
     plaintexts = [io.BytesIO(bytes([1, 2, 3, 4])), io.BytesIO(bytes([5, 6, 7, 8]))]
     encrypter = DictionaryEncrypter(alphabet, plaintexts)
-    assert bytes(encrypter.get_header())
+    assert b"".join(encrypter.get_header())
     # Only grams the alphabet can actually encode may enter the dictionary.
     for key in encrypter.dictionary_items:
         assert key in alphabet[unpack_gram_length(key, 2)]
