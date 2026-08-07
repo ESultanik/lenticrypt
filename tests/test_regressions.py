@@ -241,14 +241,12 @@ def test_missing_combination_probe_matches_alphabet_keys(keys_2):
 # --------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="len() measures the path string, not the file")
 def test_iowrapper_len_reflects_file(tmp_path):
     path = tmp_path / "twenty-bytes.bin"
     path.write_bytes(bytes(range(20)))
     assert len(IOWrapper(str(path))) == 20
 
 
-@pytest.mark.xfail(strict=True, reason="indexes the path string; also never seeks to the index")
 def test_iowrapper_getitem_reflects_file(tmp_path):
     path = tmp_path / "twenty-bytes.bin"
     path.write_bytes(bytes(range(20)))
