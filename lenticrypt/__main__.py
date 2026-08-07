@@ -1,9 +1,13 @@
 import argparse
+import contextlib
 import gzip
 import itertools
 import logging
 import random
 import sys
+from collections.abc import Sequence
+from pathlib import Path
+from typing import BinaryIO
 
 from .core import (
     ENCRYPTION_VERSION,
@@ -14,192 +18,342 @@ from .core import (
     decrypt,
     find_common_nibble_grams,
 )
-from .logger import ColorFormatter, DEFAULT_FORMAT as DEFAULT_LOG_FORMAT
+from .exceptions import LenticryptError
+from .iowrapper import auto_unzip
+from .logger import DEFAULT_FORMAT as DEFAULT_LOG_FORMAT
+from .logger import ColorFormatter
 from .progress import ProgressBarCallback
 
-logging.basicConfig(stream=sys.stderr, level=logging.INFO)
-logger = logging.getLogger(name='lenticrypt')
+logger = logging.getLogger(name="lenticrypt")
+
+COPYRIGHT = "Copyright (C) 2012--2019, Evan A. Sultanik, Ph.D.  \nhttps://www.sultanik.com/\n"
+
+# Compression levels select a prefix of this list. Longer nibble-grams compress better but need
+# proportionally more certificate material to be usable at all.
+NIBBLE_GRAM_LENGTHS = (1, 2, 4, 8, 16)
+
+LOG_LEVELS = ("QUIET", "CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
+
+ENCRYPTERS = {
+    "same-length": Encrypter,
+    "length-checksum": LengthChecksumEncrypter,
+    "dictionary": DictionaryEncrypter,
+}
+
+# Cap on how many missing byte combinations `-t` names individually. With four secrets there are
+# 65,536 of them, and a wall of output helps nobody.
+MAX_REPORTED_COMBINATIONS = 64
 
 
-def main(argv=None) -> int:
-    if argv is None:
-        argv = sys.argv
-
-    copyright_message = "Copyright (C) 2012--2019, Evan A. Sultanik, Ph.D.  \nhttps://www.sultanik.com/\n"
-
-    parser = argparse.ArgumentParser(
-        description="A toy cryptosystem with provable plausible deniability.  " + copyright_message,
-        prog="lenticrypt")
+def _add_action_arguments(parser: argparse.ArgumentParser) -> None:
+    """The mutually exclusive "what are we doing" group."""
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("-e", "--encrypt", action="append", nargs=2, type=argparse.FileType('rb'),
-                       metavar=('secret', 'plaintext'),
-                       help="encrypts the given plaintext file(s) into a single ciphertext using the given secret file(s).  Additional secret/plaintext pairs can be specified by providing the `-e` option multiple times.  For example, `-e secret1 plaintext1 -e secret2 plaintext2 -e secret3 plaintext3 ...`.  If the `-l` argument is used, any plaintext that is longer than the first one provided will be truncated.  Any plaintext that is shorter than the first one provided will be tail-padded with zeros.")
-    group.add_argument("-d", "--decrypt", nargs=2, type=str, metavar=('secret', 'ciphertext'),
-                       help="decrypts the ciphertext file using the given secret file")
-    group.add_argument("-t", "--test", type=argparse.FileType('rb'), nargs="+", metavar=('secret'),
-                       help="tests whether a given set of secrets have sufficient entropy to encrypt an equal number of plaintexts.  The exit code of the program is zero on success.  On failure, the missing byte combinations are printed to stdout.")
+    group.add_argument(
+        "-e",
+        "--encrypt",
+        action="append",
+        nargs=2,
+        metavar=("secret", "plaintext"),
+        help="encrypts the given plaintext file(s) into a single ciphertext using the given "
+        "secret file(s). Additional secret/plaintext pairs can be specified by providing `-e` "
+        "multiple times, for example `-e secret1 plaintext1 -e secret2 plaintext2`. With "
+        "`--same-length`, any plaintext longer than the first is truncated and any shorter one "
+        "is tail-padded with zeros.",
+    )
+    group.add_argument(
+        "-d",
+        "--decrypt",
+        nargs=2,
+        type=str,
+        metavar=("secret", "ciphertext"),
+        help="decrypts the ciphertext file using the given secret file. Gzipped and plain "
+        "ciphertexts are both accepted. Use `-` to read the ciphertext from standard input.",
+    )
+    group.add_argument(
+        "-t",
+        "--test",
+        nargs="+",
+        metavar="secret",
+        help="tests whether a given set of secrets has sufficient entropy to encrypt an equal "
+        "number of plaintexts. The exit code is zero on success. On failure, the missing byte "
+        "combinations are logged to stderr.",
+    )
+    group.add_argument(
+        "-v", "--version", action="store_true", default=False, help="prints version information"
+    )
 
-    parser.add_argument("-f", "--force-encrypt", action="store_true", default=False,
-                        help="force encryption, even if the secrets have insufficient entropy to correctly encrypt the plaintexts")
-    default_output = getattr(sys.stdout, 'buffer', sys.stdout)
-    parser.add_argument("-o", "--outfile", nargs='?', type=argparse.FileType('wb'), default=default_output,
-                        help="the output file (default to stdout)")
-    mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument("--same-length", action="store_true", default=False,
-                            help="removes the header that is used to specify the length of the encrypted files.  The header solves the problem of having plaintexts of unequal length, so with this option enabled encryption might be lossy if the plaintexts are not the same length.  This option does slightly strengthen plausible deniability, but has the potential to produce very large ciphertexts.")
-    mode_group.add_argument("--length-checksum", action="store_true", default=False,
-                            help="encrypts the files with an encrypted file length checksum at slight expense to plausible deniability, however, it allows for correct decryption if the plaintexts are of different lengths.  This has the potential to produce very large ciphertexts.")
-    mode_group.add_argument("--dictionary", action="store_true", default=True,
-                            help="encrypts the files using both the file length checksum used with the `-c` option, but also with an index dictionary that can greatly reduce ciphertext size.  This is the default mode for encryption.")
-    group.add_argument("-v", "--version", action="store_true", default=False, help="prints version information")
-    parser.add_argument("-q", "--quiet", action="store_true", default=False, help="suppresses log messages; equivalent to `--log-level QUIET`")
-    parser.add_argument('-l', '--log-level', type=str.upper, choices={'QUIET', 'CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'}, default='INFO', help="Set Lenticrypt's log level (default=INFO)")
-    compression_group = parser.add_mutually_exclusive_group()
-    compression_group.add_argument("-1", "--fast", action="store_true", default=False)
-    compression_group.add_argument("-2", dest="two", action="store_true", default=False)
-    compression_group.add_argument("-3", dest="three", action="store_true", default=False)
-    compression_group.add_argument("-4", dest="four", action="store_true", default=True)
-    compression_group.add_argument("-5", "--best", action="store_true", default=False,
-                                   help="These options change the compression level used, with the -1 option being the fastest, with less compression, and the -5 option being the slowest, with best compression.  CPU and memory usage will increase exponentially as the compression level increases.  The default compression level is -4.")
-    parser.add_argument("-s", "--seed", type=int, default=None,
-                        help="seeds the random number generator to the given value")
 
-    args = parser.parse_args(argv[1:])
+def _add_mode_arguments(parser: argparse.ArgumentParser) -> None:
+    """How the ciphertext is framed. One `store_const` rather than three overlapping booleans."""
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--same-length",
+        dest="mode",
+        action="store_const",
+        const="same-length",
+        help="omits the header that records the plaintext lengths. That header is what allows "
+        "plaintexts of unequal length, so without it encryption is lossy unless they match. "
+        "Slightly strengthens plausible deniability, at the cost of potentially large ciphertexts.",
+    )
+    group.add_argument(
+        "--length-checksum",
+        dest="mode",
+        action="store_const",
+        const="length-checksum",
+        help="records an encrypted plaintext-length header, so plaintexts of differing lengths "
+        "decrypt correctly, at a slight cost to plausible deniability. Can produce large "
+        "ciphertexts.",
+    )
+    group.add_argument(
+        "--dictionary",
+        dest="mode",
+        action="store_const",
+        const="dictionary",
+        help="uses the `--length-checksum` header plus an index dictionary, which can greatly "
+        "reduce ciphertext size for plaintexts of more than a few kilobytes. This is the default.",
+    )
+    parser.set_defaults(mode="dictionary")
 
-    if args.quiet or args.log_level == 'QUIET':
+
+def _add_level_arguments(parser: argparse.ArgumentParser) -> None:
+    """Compression level. `store_const` on one destination, so every level is reachable.
+
+    These were five separate `store_true` flags with `-4` defaulting to True, so the dispatching
+    `elif` chain reached `-4` before it could ever consider `-5`, making `--best` a silent no-op.
+    """
+    group = parser.add_mutually_exclusive_group()
+    for level, flags in enumerate(
+        [("-1", "--fast"), ("-2",), ("-3",), ("-4",), ("-5", "--best")], start=1
+    ):
+        group.add_argument(
+            *flags,
+            dest="level",
+            action="store_const",
+            const=level,
+            help="These options set the compression level: -1 is fastest with least compression, "
+            "-5 is slowest with the most. CPU and memory use grow sharply with the level, because "
+            "each one indexes a longer nibble-gram. The default is -4."
+            if level == 5
+            else argparse.SUPPRESS,
+        )
+    parser.set_defaults(level=4)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="A toy cryptosystem with provable plausible deniability.  " + COPYRIGHT,
+        prog="lenticrypt",
+    )
+    _add_action_arguments(parser)
+    parser.add_argument(
+        "-f",
+        "--force-encrypt",
+        action="store_true",
+        default=False,
+        help="force encryption even if the secrets have insufficient entropy to correctly encrypt "
+        "the plaintexts",
+    )
+    parser.add_argument(
+        "-o",
+        "--outfile",
+        nargs="?",
+        default=None,
+        help="the output file (defaults to stdout)",
+    )
+    _add_mode_arguments(parser)
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        default=False,
+        help="suppresses log messages; equivalent to `--log-level QUIET`",
+    )
+    parser.add_argument(
+        "-l",
+        "--log-level",
+        type=str.upper,
+        choices=LOG_LEVELS,
+        default="INFO",
+        help="set Lenticrypt's log level (default: INFO)",
+    )
+    _add_level_arguments(parser)
+    parser.add_argument(
+        "-s",
+        "--seed",
+        type=int,
+        default=None,
+        help="seeds the random number generator, making the ciphertext reproducible",
+    )
+    return parser
+
+
+def configure_logging(args: argparse.Namespace) -> None:
+    if args.quiet or args.log_level == "QUIET":
         logger.setLevel(logging.CRITICAL)
-        logger.propagate = False
         use_color = False
     else:
         logger.setLevel(getattr(logging, args.log_level))
         use_color = sys.stderr.isatty()
+    logger.propagate = False
     if not logger.handlers:
-        logger.propagate = False
         handler = logging.StreamHandler()
         handler.setFormatter(ColorFormatter(DEFAULT_LOG_FORMAT, use_color=use_color))
         logger.addHandler(handler)
 
+
+def _progress_callback(args: argparse.Namespace) -> ProgressBarCallback | None:
+    """A progress bar only when there is a terminal to draw it on."""
+    if args.quiet or not sys.stderr.isatty():
+        return None
+    return ProgressBarCallback()
+
+
+def missing_combinations(substitution_alphabet: dict, num_secrets: int) -> list[tuple[bytes, ...]]:
+    """The single-nibble combinations the secrets cannot encode.
+
+    The probe used to build `tuple((c,) for c in combination)` -- a tuple of int-tuples -- and test
+    it against an alphabet keyed by tuples of `bytes`. Membership could never succeed, so on failure
+    every combination was reported missing.
+    """
+    single_grams = substitution_alphabet.get(1, {})
+    return [
+        gram
+        for gram in (
+            tuple(bytes([nibble]) for nibble in combination)
+            for combination in itertools.product(range(16), repeat=num_secrets)
+        )
+        if gram not in single_grams
+    ]
+
+
+def _format_missing(missing: Sequence[tuple[bytes, ...]]) -> str:
+    """Renders missing combinations as hex nibbles.
+
+    Previously rendered with `chr()` of values 0-15, i.e. control characters, and accumulated by
+    repeated string concatenation.
+    """
+    lines = [
+        "There is not sufficient coverage between the secrets to encrypt all possible bytes!",
+        f"{len(missing)} missing nibble combination(s):",
+    ]
+    lines.extend(
+        "  " + " ".join(f"0x{byte[0]:x}" for byte in gram)
+        for gram in missing[:MAX_REPORTED_COMBINATIONS]
+    )
+    if len(missing) > MAX_REPORTED_COMBINATIONS:
+        lines.append(f"  ...and {len(missing) - MAX_REPORTED_COMBINATIONS} more")
+    return "\n".join(lines)
+
+
+def do_version(_args: argparse.Namespace, outfile: BinaryIO) -> int:
+    outfile.write(
+        f"Lenticrypt {VERSION}\nCryptosystem Version {ENCRYPTION_VERSION}\n{COPYRIGHT}\n".encode()
+    )
+    return 0
+
+
+def do_encrypt(args: argparse.Namespace, outfile: BinaryIO) -> int:
+    secrets = tuple(Path(secret).read_bytes() for secret, _plaintext in args.encrypt)
+    lengths = NIBBLE_GRAM_LENGTHS[: args.level]
+    with contextlib.ExitStack() as stack:
+        callback = _progress_callback(args)
+        if callback is not None:
+            stack.enter_context(callback)
+        substitution_alphabet = find_common_nibble_grams(
+            secrets, nibble_gram_lengths=lengths, status_callback=callback
+        )
+    if len(substitution_alphabet[1]) < 16 ** len(secrets):
+        message = (
+            "There is not sufficient coverage between the secrets to encrypt all possible bytes!"
+        )
+        if not args.force_encrypt:
+            logger.error(message)
+            logger.info("To encrypt anyway, re-run with the `-f` option.")
+            return 1
+        logger.warning(message)
+    del secrets
+
+    with contextlib.ExitStack() as stack:
+        callback = _progress_callback(args)
+        if callback is not None:
+            stack.enter_context(callback)
+        # `filename=''` suppresses the gzip FNAME field: given only `fileobj`, gzip stores
+        # `fileobj.name`, so the ciphertext carried the path it was written to, in cleartext.
+        # `mtime=1` keeps the timestamp out too, so `--seed` gives byte-identical output.
+        zipfile = stack.enter_context(
+            gzip.GzipFile(fileobj=outfile, mode="wb", mtime=1, filename="")
+        )
+        encrypter = ENCRYPTERS[args.mode]
+        plaintexts = tuple(
+            stack.enter_context(Path(plaintext).open("rb")) for _secret, plaintext in args.encrypt
+        )
+        zipfile.write(bytes(encrypter(substitution_alphabet, plaintexts, status_callback=callback)))
+    return 0
+
+
+def do_decrypt(args: argparse.Namespace, outfile: BinaryIO) -> int:
+    secret_path, ciphertext_path = args.decrypt
+    # auto_unzip accepts plain as well as gzipped ciphertexts; the previous `gzip.GzipFile(...)`
+    # raised an uncaught BadGzipFile traceback at the user for anything not gzipped.
+    with auto_unzip(ciphertext_path) as ciphertext, Path(secret_path).open("rb") as secret:
+        outfile.write(bytes(decrypt(ciphertext, secret)))
+    return 0
+
+
+def do_test(args: argparse.Namespace, _outfile: BinaryIO) -> int:
+    secrets = tuple(Path(secret).read_bytes() for secret in args.test)
+    with contextlib.ExitStack() as stack:
+        callback = _progress_callback(args)
+        if callback is not None:
+            stack.enter_context(callback)
+        substitution_alphabet = find_common_nibble_grams(
+            secrets, nibble_gram_lengths=(1,), status_callback=callback, stop_when_sufficient=True
+        )
+    missing = missing_combinations(substitution_alphabet, len(secrets))
+    if missing:
+        logger.critical(_format_missing(missing))
+        return 1
+    logger.info("This set of secrets looks good!")
+    return 0
+
+
+def _select_action(args: argparse.Namespace):
+    if args.version:
+        return do_version
+    if args.encrypt:
+        return do_encrypt
+    if args.decrypt:
+        return do_decrypt
+    return do_test
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv
+    args = build_parser().parse_args(argv[1:])
+    configure_logging(args)
     if args.seed is not None:
         random.seed(args.seed)
 
-    try:
-        if args.version:
-            sys.stdout.write(f"Lenticrypt {VERSION}\nCryptosystem Version {ENCRYPTION_VERSION}\n{copyright_message}\n")
-        elif args.encrypt:
-            secrets = tuple(bytearray(s[0].read()) for s in args.encrypt)
-            nibble_gram_lengths = [1, 2, 4, 8, 16]
-            if args.fast:
-                nibble_gram_lengths = nibble_gram_lengths[:1]
-            elif args.two:
-                nibble_gram_lengths = nibble_gram_lengths[:2]
-            elif args.three:
-                nibble_gram_lengths = nibble_gram_lengths[:3]
-            elif args.four:
-                nibble_gram_lengths = nibble_gram_lengths[:4]
-            callback = None
-            if not args.quiet and sys.stderr.isatty():
-                callback = ProgressBarCallback()
-            try:
-                substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths=nibble_gram_lengths,
-                                                                 status_callback=callback)
-            except (KeyboardInterrupt, SystemExit):
-                # die gracefully, without a stacktrace
-                return 1
-            finally:
-                if callback is not None:
-                    callback.clear()
-            if len(substitution_alphabet[1]) < 16 ** len(secrets):
-                err_msg = 'There is not sufficient coverage between the certificates to encrypt all possible bytes!'
-                if args.force_encrypt:
-                    logger.warning(err_msg)
-                else:
-                    logger.error(err_msg)
-                    logger.info('To suppress this error, re-run with the `-f` option.')
-                    return 1
-            # let the secret files be garbage collected, if needed:
-            secrets = None
-            callback = None
-            if not args.quiet and sys.stderr.isatty():
-                callback = ProgressBarCallback()
-            try:
-                # `filename=''` suppresses the gzip FNAME field. Given only `fileobj`, gzip derives
-                # the stored name from `fileobj.name`, so the ciphertext carried the name it was
-                # written to -- in cleartext, recoverable with `dd`. For a tool whose purpose is
-                # deniability, `-o my-secret-plans.enc` leaking "my-secret-plans.enc" defeats the
-                # point. It also made output depend on the output path, so `--seed` could not give
-                # byte-identical results.
-                #
-                # `mode='wb'` is explicit because gzip on Python 3.14 warns that inferring write
-                # mode from `fileobj` will stop working.
-                #
-                # mtime=1 keeps the timestamp out of the header, for the same reproducibility reason.
-                with gzip.GzipFile(
-                    fileobj=args.outfile, mode="wb", mtime=1, filename=""
-                ) as zipfile:
-                    if args.same_length:
-                        encrypter = Encrypter
-                    elif args.length_checksum:
-                        encrypter = LengthChecksumEncrypter
-                    else:
-                        encrypter = DictionaryEncrypter
-                    zipfile.write(bytes(encrypter(substitution_alphabet, tuple(e[1] for e in args.encrypt),
-                                          status_callback=callback)))
-            except (KeyboardInterrupt, SystemExit):
-                # die gracefully, without a stacktrace
-                return 1
-            finally:
-                if callback is not None:
-                    callback.clear()
-        elif args.decrypt:
-            try:
-                with gzip.GzipFile(args.decrypt[1]) as ciphertext:
-                    with open(args.decrypt[0], 'rb') as secret:
-                        args.outfile.write(bytes(decrypt(ciphertext, secret)))
-            except (KeyboardInterrupt, SystemExit):
-                # die gracefully, without a stacktrace
-                return 1
-        elif args.test:
-            secrets = tuple(s.read() for s in args.test)
-            callback = None
-            if not args.quiet and sys.stderr.isatty():
-                callback = ProgressBarCallback()
-            try:
-                substitution_alphabet = find_common_nibble_grams(secrets, nibble_gram_lengths=(1,), status_callback=callback, stop_when_sufficient=True)
-            except (KeyboardInterrupt, SystemExit):
-                # die gracefully, without a stacktrace
-                return 1
-            finally:
-                if callback is not None:
-                    callback.clear()
-            if len(substitution_alphabet[1]) < 16 ** len(secrets):
-                message = "There is not sufficient coverage between the certificates to encrypt all possible bytes!\nMissing byte combinations:"
-                for combination in itertools.product(*[range(16) for _ in range(len(secrets))]):
-                    if tuple((c,) for c in combination) not in substitution_alphabet[1]:
-                        message = f"{message}\n{tuple(chr(c) for c in combination)}"
-                logger.critical(message)
-                return 1
-            else:
-                logger.info("This set of secrets looks good!")
-                return 0
-        return 0
-    finally:
-        if args.encrypt:
-            for e in args.encrypt:
-                for encrypt_file in e:
-                    encrypt_file.close()
-        if args.outfile is not None:
-            # Only close streams we opened. `default_output` is `sys.stdout.buffer`, which the
-            # previous `!= sys.stdout` guard never matched -- closing it discarded any output still
-            # buffered in the enclosing TextIOWrapper (making `--version` print nothing) and left
-            # stdout unusable for the rest of the process.
-            if args.outfile is default_output:
-                args.outfile.flush()
-            else:
-                args.outfile.close()
-        if args.test:
-            for test_file in args.test:
-                test_file.close()
+    with contextlib.ExitStack() as stack:
+        if args.outfile is None or args.outfile == "-":
+            # stdout is not ours to close; flushing is enough, and closing it discarded output
+            # still buffered in the enclosing TextIOWrapper.
+            outfile = getattr(sys.stdout, "buffer", sys.stdout)
+            stack.callback(outfile.flush)
+        else:
+            outfile = stack.enter_context(Path(args.outfile).open("wb"))
+        try:
+            return _select_action(args)(args, outfile)
+        except (KeyboardInterrupt, BrokenPipeError):
+            # Die quietly; a stack trace here is noise, not information.
+            return 1
+        except LenticryptError as error:
+            # Deliberately `error`, not `exception`: a LenticryptError means the *input* was bad,
+            # so the message is the useful part and a traceback is noise.
+            logger.error(str(error))  # noqa: TRY400
+            return 1
 
 
-if __name__ == '__main__':
-    exit(main())
+if __name__ == "__main__":
+    sys.exit(main())

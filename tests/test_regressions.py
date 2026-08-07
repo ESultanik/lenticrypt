@@ -194,46 +194,36 @@ def test_seeded_encryption_is_reproducible(alphabet_2):
 # --------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True, reason="-4 is store_true with default=True, so the elif chain never reaches -5"
-)
 def test_best_compression_differs_from_default():
-    """`-5/--best` is silently identical to `-4`, so 16-nibble-grams are unreachable."""
-    import argparse
+    """`-5/--best` was silently identical to `-4`.
 
-    def selected(flags):
-        parser = argparse.ArgumentParser()
-        group = parser.add_mutually_exclusive_group()
-        group.add_argument("-1", "--fast", action="store_true", default=False)
-        group.add_argument("-2", dest="two", action="store_true", default=False)
-        group.add_argument("-3", dest="three", action="store_true", default=False)
-        group.add_argument("-4", dest="four", action="store_true", default=True)
-        group.add_argument("-5", "--best", action="store_true", default=False)
-        args = parser.parse_args(flags)
-        lengths = [1, 2, 4, 8, 16]
-        if args.fast:
-            return lengths[:1]
-        if args.two:
-            return lengths[:2]
-        if args.three:
-            return lengths[:3]
-        if args.four:
-            return lengths[:4]
-        return lengths
+    The five levels were separate `store_true` flags with `-4` defaulting to True, so the
+    dispatching `elif` chain reached `-4` before it could consider `-5`, and 16-nibble-grams were
+    unreachable. Exercises the real parser rather than a replica of the old logic.
+    """
+    from lenticrypt.__main__ import NIBBLE_GRAM_LENGTHS, build_parser
 
-    assert selected(["-5"]) != selected(["-4"])
-    assert selected(["-5"]) == [1, 2, 4, 8, 16]
+    def lengths(flags):
+        return NIBBLE_GRAM_LENGTHS[: build_parser().parse_args([*flags, "-v"]).level]
+
+    assert lengths(["-5"]) != lengths(["-4"])
+    assert lengths(["-5"]) == (1, 2, 4, 8, 16)
+    assert lengths(["-4"]) == (1, 2, 4, 8)
+    assert lengths([]) == (1, 2, 4, 8), "the default is still -4"
+    for level, expected in enumerate([(1,), (1, 2), (1, 2, 4), (1, 2, 4, 8)], start=1):
+        assert lengths([f"-{level}"]) == expected
 
 
-@pytest.mark.xfail(
-    strict=True, reason="probes tuple-of-int against an alphabet keyed by tuple-of-bytes"
-)
-def test_missing_combination_probe_matches_alphabet_keys(keys_2):
-    """`-t`'s report probes `tuple((c,) for c in combination)`, but alphabet keys look like
-    `(b'\\x00', b'\\x0f')`, so membership always fails and every combination is reported missing."""
-    alphabet = find_common_nibble_grams(keys_2, nibble_gram_lengths=(1,))
-    probe = tuple((c,) for c in (0, 0))
-    assert probe in alphabet[1]
+def test_missing_combinations_uses_the_alphabet_key_shape(keys_2, weak_keys):
+    """`-t`'s report probed `tuple((c,) for c in combination)` -- a tuple of int-tuples -- against
+    an alphabet keyed by tuples of `bytes`, so membership never matched and every combination was
+    reported missing."""
+    from lenticrypt.__main__ import missing_combinations
+
+    assert missing_combinations(find_common_nibble_grams(keys_2, nibble_gram_lengths=(1,)), 2) == []
+    missing = missing_combinations(find_common_nibble_grams(weak_keys, nibble_gram_lengths=(1,)), 2)
+    assert len(missing) == 255, "weak keys cover only the all-zero gram"
+    assert all(isinstance(part, bytes) for gram in missing for part in gram)
 
 
 # --------------------------------------------------------------------------------------------------
