@@ -5,9 +5,9 @@ import itertools
 import logging
 import random
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, cast
 
 from .core import (
     ENCRYPTION_VERSION,
@@ -210,7 +210,7 @@ def _progress_callback(args: argparse.Namespace) -> ProgressBarCallback | None:
     return ProgressBarCallback()
 
 
-def missing_combinations(substitution_alphabet: dict, num_secrets: int) -> list[tuple[bytes, ...]]:
+def missing_combinations(substitution_alphabet: dict, num_secrets: int) -> list[bytes]:
     """The single-nibble combinations the secrets cannot encode.
 
     The probe used to build `tuple((c,) for c in combination)` -- a tuple of int-tuples -- and test
@@ -315,8 +315,7 @@ def do_decrypt(args: argparse.Namespace, outfile: BinaryIO) -> int:
     # auto_unzip accepts plain as well as gzipped ciphertexts; the previous `gzip.GzipFile(...)`
     # raised an uncaught BadGzipFile traceback at the user for anything not gzipped.
     with auto_unzip(ciphertext_path) as ciphertext, Path(secret_path).open("rb") as secret:
-        for chunk in decrypt_chunks(ciphertext, secret):
-            outfile.write(chunk)
+        outfile.writelines(decrypt_chunks(ciphertext, secret))
     return 0
 
 
@@ -337,7 +336,9 @@ def do_test(args: argparse.Namespace, _outfile: BinaryIO) -> int:
     return 0
 
 
-def _select_action(args: argparse.Namespace):
+def _select_action(
+    args: argparse.Namespace,
+) -> Callable[[argparse.Namespace, BinaryIO], int]:
     if args.version:
         return do_version
     if args.encrypt:
@@ -357,10 +358,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.outfile is None or args.outfile == "-":
             # stdout is not ours to close; flushing is enough, and closing it discarded output
             # still buffered in the enclosing TextIOWrapper.
-            outfile = getattr(sys.stdout, "buffer", sys.stdout)
+            outfile = cast("BinaryIO", getattr(sys.stdout, "buffer", sys.stdout))
             stack.callback(outfile.flush)
         else:
-            outfile = stack.enter_context(Path(args.outfile).open("wb"))
+            outfile = cast("BinaryIO", stack.enter_context(Path(args.outfile).open("wb")))
         try:
             return _select_action(args)(args, outfile)
         except (KeyboardInterrupt, BrokenPipeError):

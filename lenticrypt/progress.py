@@ -13,7 +13,7 @@ class StatusCallback(Protocol):
 class StatusLine:
     """A single terminal line that can be overwritten in place."""
 
-    def __init__(self, stream: IO = sys.stderr):
+    def __init__(self, stream: IO = sys.stderr) -> None:
         self.stream = stream
         self.clear()
 
@@ -29,8 +29,13 @@ class StatusLine:
 
 
 class ProgressBar(StatusLine):
-    def __init__(self, starting_value: int = 0, max_value: int = 100, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        starting_value: int = 0,
+        max_value: int = 100,
+        stream: IO = sys.stderr,
+    ) -> None:
+        super().__init__(stream)
         self.max_value = max_value
         self.value = starting_value
         self._last_percent = -1
@@ -82,7 +87,7 @@ class ProgressBar(StatusLine):
 class ProgressBarCallback:
     """Adapts `ProgressBar` to the `StatusCallback` protocol, creating the bar on first use."""
 
-    def __init__(self, stream: IO = sys.stderr):
+    def __init__(self, stream: IO = sys.stderr) -> None:
         self.stream = stream
         self.pb: ProgressBar | None = None
 
