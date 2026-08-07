@@ -25,7 +25,7 @@ class FrozenDict(Mapping[K, V_co], Generic[K, V_co]):
     checker; only the spelling and variance inference differ.
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
         # As permissive as `dict()` itself, including the keyword form. Built through an explicitly
         # `Any`-typed local: keyword arguments can only ever contribute `str` keys, so inferring
         # directly would widen the key type to `K | str` and contradict the declaration.

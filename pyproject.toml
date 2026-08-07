@@ -55,10 +55,9 @@ target-version = "py310"
 extend-exclude = []
 
 [tool.ruff.lint]
-# `ANN` (annotations) is deliberately absent: the tree is only partially annotated, and turning it
-# on now would bury every other finding. It is enabled once the typing pass lands.
 select = [
     "A",    # builtin shadowing
+    "ANN",  # missing annotations
     "ARG",  # unused arguments
     "B",    # bugbear
     "BLE",  # blind except
@@ -88,8 +87,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Asserts are the point of a test, and seeded `random` is how the fixtures stay deterministic.
-"tests/*" = ["S101", "S311"]
+# Asserts are the point of a test, seeded `random` is how the fixtures stay deterministic, and
+# annotating every test function adds noise without adding safety.
+"tests/*" = ["S101", "S311", "ANN"]
 
 [tool.ty.environment]
 python-version = "3.10"

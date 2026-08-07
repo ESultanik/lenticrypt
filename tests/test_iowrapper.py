@@ -91,7 +91,7 @@ def test_caller_supplied_stream_is_not_closed():
 
 def test_unsupported_source_is_rejected():
     with pytest.raises(LenticryptError):
-        IOWrapper(object())  # type: ignore[arg-type]
+        IOWrapper(object())  # ty: ignore[invalid-argument-type]
 
 
 def test_stdin_is_read_as_binary_and_left_open():
