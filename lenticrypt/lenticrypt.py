@@ -8,15 +8,17 @@ from collections import defaultdict
 from io import BytesIO
 from typing import Any, BinaryIO, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Union
 
+from .__about__ import __version__
 from .iowrapper import get_length, IOWrappable, IOWrapper
 from .utils import FrozenDict
 
 logger = logging.getLogger(name='lenticrypt')
 
+# The version of the ciphertext file format, independent of the package version: bumping one does
+# not imply bumping the other. Prior releases conflated them by encoding this as the semver minor.
 ENCRYPTION_VERSION: int = 3
-MAJOR_VERSION: int = 0
-MINOR_VERSION: int = 1
-VERSION: str = f"{MAJOR_VERSION}.{ENCRYPTION_VERSION}.{MINOR_VERSION}"
+
+VERSION: str = __version__
 
 StatusCallbackTypeHint = Optional[Callable[[int, int, str], Any]]
 
