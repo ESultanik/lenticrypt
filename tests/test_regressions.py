@@ -25,6 +25,7 @@ from lenticrypt import (
 from lenticrypt.exceptions import LenticryptError, UnsupportedVersionError
 from lenticrypt.iowrapper import IOWrapper
 from lenticrypt.progress import ProgressBar
+from lenticrypt.rng import seeded_rng
 
 from .conftest import make_plaintexts
 
@@ -177,8 +178,11 @@ def test_seeded_encryption_is_reproducible(alphabet_2):
     plaintexts = make_plaintexts((128, 128))
 
     def encrypt_once():
-        random.seed(4242)
-        return bytes(DictionaryEncrypter(alphabet_2, [io.BytesIO(p) for p in plaintexts]))
+        return bytes(
+            DictionaryEncrypter(
+                alphabet_2, [io.BytesIO(p) for p in plaintexts], rng=seeded_rng(4242)
+            )
+        )
 
     assert encrypt_once() == encrypt_once()
 

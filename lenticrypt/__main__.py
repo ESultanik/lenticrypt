@@ -24,6 +24,7 @@ from .iowrapper import auto_unzip
 from .logger import DEFAULT_FORMAT as DEFAULT_LOG_FORMAT
 from .logger import ColorFormatter
 from .progress import ProgressBarCallback
+from .rng import default_rng, seeded_rng
 
 logger = logging.getLogger(name="lenticrypt")
 
@@ -252,6 +253,17 @@ def do_version(_args: argparse.Namespace, outfile: BinaryIO) -> int:
     return 0
 
 
+def _rng(args: argparse.Namespace) -> random.Random:
+    """A CSPRNG by default; a reproducible generator only when `--seed` asks for one."""
+    if args.seed is None:
+        return default_rng()
+    logger.warning(
+        "--seed makes this ciphertext reproducible, and therefore predictable. Use it for testing, "
+        "not for anything you need kept secret."
+    )
+    return seeded_rng(args.seed)
+
+
 def do_encrypt(args: argparse.Namespace, outfile: BinaryIO) -> int:
     secrets = tuple(Path(secret).read_bytes() for secret, _plaintext in args.encrypt)
     # The level caps how far up the ladder we go; the adaptive choice drops lengths that these
@@ -292,7 +304,7 @@ def do_encrypt(args: argparse.Namespace, outfile: BinaryIO) -> int:
         )
         # Written as it is produced, so peak memory does not scale with the ciphertext.
         for chunk in encrypter(
-            substitution_alphabet, plaintexts, status_callback=callback
+            substitution_alphabet, plaintexts, status_callback=callback, rng=_rng(args)
         ).chunks():
             zipfile.write(chunk)
     return 0
@@ -340,8 +352,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         argv = sys.argv
     args = build_parser().parse_args(argv[1:])
     configure_logging(args)
-    if args.seed is not None:
-        random.seed(args.seed)
 
     with contextlib.ExitStack() as stack:
         if args.outfile is None or args.outfile == "-":

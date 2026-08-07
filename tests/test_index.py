@@ -18,6 +18,7 @@ from lenticrypt import (
     select_nibble_gram_lengths,
     unpack_gram_length,
 )
+from lenticrypt.rng import seeded_rng
 
 from .conftest import make_keys, make_plaintexts
 
@@ -162,20 +163,25 @@ class TestChunkedOutput:
     @pytest.mark.parametrize("chunk_size", [1, 7, 64, 4096, 1 << 20])
     def test_encrypt_chunks_reassemble_to_the_same_ciphertext(self, chunk_size, credentials):
         _keys, alphabet, plaintexts = credentials
-        random.seed(11)
-        whole = bytes(DictionaryEncrypter(alphabet, [io.BytesIO(p) for p in plaintexts]))
-        random.seed(11)
+        # An explicit seeded generator: the encrypters no longer read module-level `random`, so
+        # `random.seed()` cannot make two runs agree.
+        whole = bytes(
+            DictionaryEncrypter(alphabet, [io.BytesIO(p) for p in plaintexts], rng=seeded_rng(11))
+        )
         chunked = b"".join(
-            DictionaryEncrypter(alphabet, [io.BytesIO(p) for p in plaintexts]).chunks(chunk_size)
+            DictionaryEncrypter(
+                alphabet, [io.BytesIO(p) for p in plaintexts], rng=seeded_rng(11)
+            ).chunks(chunk_size)
         )
         assert chunked == whole
 
     def test_chunks_respect_the_requested_size(self, credentials):
         _keys, alphabet, plaintexts = credentials
-        random.seed(11)
         sizes = [
             len(c)
-            for c in DictionaryEncrypter(alphabet, [io.BytesIO(p) for p in plaintexts]).chunks(1024)
+            for c in DictionaryEncrypter(
+                alphabet, [io.BytesIO(p) for p in plaintexts], rng=seeded_rng(11)
+            ).chunks(1024)
         ]
         # Every chunk but the last reaches the threshold; blocks are small, so none overshoot much.
         assert all(1024 <= size < 1024 + 16 for size in sizes[:-1])
@@ -184,8 +190,9 @@ class TestChunkedOutput:
     @pytest.mark.parametrize("chunk_size", [1, 7, 64, 4096, 1 << 20])
     def test_decrypt_chunks_reassemble_to_the_same_plaintext(self, chunk_size, credentials):
         keys, alphabet, plaintexts = credentials
-        random.seed(11)
-        ciphertext = bytes(DictionaryEncrypter(alphabet, [io.BytesIO(p) for p in plaintexts]))
+        ciphertext = bytes(
+            DictionaryEncrypter(alphabet, [io.BytesIO(p) for p in plaintexts], rng=seeded_rng(11))
+        )
         whole = bytes(decrypt(io.BytesIO(ciphertext), io.BytesIO(keys[0])))
         chunked = b"".join(
             decrypt_chunks(io.BytesIO(ciphertext), io.BytesIO(keys[0]), chunk_size=chunk_size)
