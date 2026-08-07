@@ -30,6 +30,7 @@ from .exceptions import (
     UnsupportedVersionError,
 )
 from .iowrapper import get_length, IOWrappable, IOWrapper
+from .rng import default_rng
 from .utils import FrozenDict
 
 __all__ = [
@@ -308,7 +309,11 @@ class Encrypter(object):
         substitution_alphabet: CommonNibbleGramsTypeHint,
         to_encrypt: Sequence[BinaryIO],
         status_callback: StatusCallbackTypeHint = None,
+        rng: Optional[random.Random] = None,
     ):
+        # Explicit rather than module-level `random`, so the caller decides between a CSPRNG and a
+        # seeded generator, and so nothing else in the process can perturb the ciphertext.
+        self.rng = default_rng() if rng is None else rng
         self.substitution_alphabet = substitution_alphabet
         self.to_encrypt = to_encrypt
         self.sorted_lengths = sorted(substitution_alphabet.keys(), reverse=True)
@@ -376,7 +381,7 @@ class Encrypter(object):
 
     def encode_block(self, key: bytes, length: int) -> bytes:
         """Encodes one accepted gram key as a ciphertext block."""
-        index = random.choice(self.substitution_alphabet[length][key])
+        index = self.rng.choice(self.substitution_alphabet[length][key])
         if index < 256:
             index_bytes, index_type = 1, "B"  # unsigned char
         elif index < 65536:
@@ -503,7 +508,8 @@ class LengthChecksumEncrypter(Encrypter):
         deniability than zeros. Only reached for readers genuinely at end of stream -- padding one
         that still held data is what corrupted plaintexts.
         """
-        return bytes(random.randint(0, 15) for _ in range(length))
+        # One bulk draw rather than `length` separate calls, each masked to a nibble.
+        return bytes(byte & 0x0F for byte in self.rng.randbytes(length))
 
     def get_header(self):
         block_header = (
@@ -514,7 +520,9 @@ class LengthChecksumEncrypter(Encrypter):
             BytesIO(struct.pack("<Q", get_length(stream))) for stream in self.to_encrypt
         )
         try:
-            yield from Encrypter(self.substitution_alphabet, lengths, status_callback=None).blocks()
+            yield from Encrypter(
+                self.substitution_alphabet, lengths, status_callback=None, rng=self.rng
+            ).blocks()
         finally:
             for length in lengths:
                 length.close()
