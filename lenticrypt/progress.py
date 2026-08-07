@@ -75,13 +75,13 @@ class ProgressBar(StatusLine):
         start = max((width - len(label)) // 2, 0)
         # Spaces inside the label that fall within the filled region become bar characters, so the
         # label stays legible without punching a hole in the bar.
-        labelled = "".join(
+        labeled = "".join(
             "=" if character == " " and start + offset < filled else character
             for offset, character in enumerate(label)
         )
         left = "".join("=" if i < filled else "-" for i in range(start))
         right = "".join("=" if i < filled else "-" for i in range(start + len(label), width))
-        return f"[{left}{labelled}{right}]"
+        return f"[{left}{labeled}{right}]"
 
 
 class ProgressBarCallback:

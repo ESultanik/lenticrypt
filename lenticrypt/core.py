@@ -407,7 +407,7 @@ class Encrypter:
         """Walks the plaintexts in lockstep, yielding each `(length, grams)` that can be encoded.
 
         This is the only place nibbles are consumed, so it is structurally impossible to emit a
-        block for nibbles that were not consumed -- the desynchronisation that corrupted output.
+        block for nibbles that were not consumed -- the desynchronization that corrupted output.
         Longest gram lengths are tried first; a length that cannot be represented falls back to a
         shorter one, and at length 1 the nibbles are consumed with a warning so that the walk always
         makes progress.
@@ -451,7 +451,7 @@ class Encrypter:
                     )
                     raise LenticryptError(message)
                 break
-        # Only summarise when there was more than the individually reported grams to report.
+        # Only summarize when there was more than the individually reported grams to report.
         if self._unencodable_count > len(self._unencodable):
             logger.warning(
                 f"{self._unencodable_count} nibble-gram(s) in total could not be encoded during "
@@ -695,7 +695,7 @@ VALID_INDEX_BYTES = frozenset(index_type_map)
 
 
 class _NibbleAssembler:
-    """Reassembles a plaintext from nibbles, honouring the declared length.
+    """Reassembles a plaintext from nibbles, honoring the declared length.
 
     A single place that owns the half-byte carry and the `file_length` bound. There were four
     near-identical copies of this carry logic, and the one in `_decrypt_dictionary` checked the
@@ -926,6 +926,6 @@ def decrypt(
             # A damaged compression envelope is still a damaged ciphertext, and should read as one
             # rather than as an `EOFError` traceback from deep inside gzip. Caught narrowly on
             # purpose: a generic OSError here could be a real disk failure, which must not be
-            # relabelled as malformed input.
+            # relabeled as malformed input.
             message = f"The ciphertext is not readable: {error}"
             raise MalformedCiphertextError(message) from error

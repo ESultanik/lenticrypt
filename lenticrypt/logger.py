@@ -15,7 +15,7 @@ LEVEL_COLORS = {
 
 DEFAULT_FORMAT = "$RESET$LEVELCOLOR$BOLD%(levelname)-8s$RESET %(message)s"
 
-# Placeholder substituted with the colour of the record's own level, rather than a fixed colour.
+# Placeholder substituted with the color of the record's own level, rather than a fixed color.
 LEVEL_COLOR_PLACEHOLDER = "$LEVELCOLOR"
 
 
@@ -57,14 +57,14 @@ class ColorFormatter(logging.Formatter):
 
     @staticmethod
     def expand(fmt: str) -> str:
-        """Replaces colour placeholders with ANSI escapes, leaving `$LEVELCOLOR` for `format`."""
+        """Replaces color placeholders with ANSI escapes, leaving `$LEVELCOLOR` for `format`."""
         for color in CGAColors:
             fmt = fmt.replace(f"${color.name}", ansi_color(color))
         return fmt.replace("$RESET", ANSI_RESET).replace("$BOLD", ANSI_BOLD)
 
     @staticmethod
     def strip(fmt: str) -> str:
-        """Removes every colour placeholder, for non-tty output."""
+        """Removes every color placeholder, for non-tty output."""
         for color in CGAColors:
             fmt = fmt.replace(f"${color.name}", "")
         for placeholder in ("$RESET", "$BOLD", LEVEL_COLOR_PLACEHOLDER):
@@ -76,7 +76,7 @@ class ColorFormatter(logging.Formatter):
         if record.levelno == logging.INFO:
             return record.getMessage()
         if not self._use_color:
-            # Colour off still means *labelled*. Previously this returned the bare message for every
+            # Color off still means *labeled*. Previously this returned the bare message for every
             # level, so redirecting stderr to a file silently discarded the fact that a message was
             # a WARNING or an ERROR. The placeholders are already stripped from the format string.
             return super().format(record)

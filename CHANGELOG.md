@@ -50,7 +50,7 @@ For a tool whose purpose is plausible deniability, that is recoverable metadata 
   `IOWrapper('-')` also closed `sys.stdin`.
 - Malformed ciphertexts raised `struct.error`, `TypeError`, or `EOFError`. They now raise
   `MalformedCiphertextError`, and the CLI reports it as a message rather than a traceback.
-- With colour disabled, every log level printed bare, so redirecting stderr discarded the fact that
+- With color disabled, every log level printed bare, so redirecting stderr discarded the fact that
   a message was an ERROR.
 - `ProgressBar` divided by zero for short keys, and drew against the first phase's scale forever.
 
@@ -82,7 +82,7 @@ For a tool whose purpose is plausible deniability, that is recoverable metadata 
 - `Encrypter`'s hooks changed shape: `process_nibble` and `process_nibbles` are replaced by
   `pad_nibble_gram`, `can_encode` and `encode_block`; `get_max_length` by `total_nibbles`;
   `get_tuple` and `are_valid_nibbles` are gone. Subclasses outside this package will need updating —
-  deliberately breaking rather than silently changing behaviour.
+  deliberately breaking rather than silently changing behavior.
 - `decrypt`'s `cert=` and `file_length=` parameters are no longer positional; they existed for an
   internal recursion that no longer happens.
 - `AutoUnzippingStream` and `GzipIOWrapper` are replaced by `auto_unzip`.
@@ -100,4 +100,4 @@ For a tool whose purpose is plausible deniability, that is recoverable metadata 
 
 ## 0.3.1 (2019-02-15)
 
-Python 3 port and colour logging.
+Python 3 port and color logging.

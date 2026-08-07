@@ -66,7 +66,7 @@ For two 512 KiB keys the index takes about 0.25s and 62 MB. Encryption itself th
 6 seconds per MiB of plaintext, which is the dominant cost for anything sizeable.
 
 Ciphertexts are larger than the plaintext, by a factor that improves with size as the dictionary
-header is amortised — measured with two secrets, at 5.5x for 512 B, 4.4x at 4 KiB, 3.5x at 64 KiB,
+header is amortized — measured with two secrets, at 5.5x for 512 B, 4.4x at 4 KiB, 3.5x at 64 KiB,
 and 2.7x at 512 KiB. Size tracks the *largest* plaintext, not the number of them.
 
 Both encryption and decryption stream, so memory does not scale with file size.
