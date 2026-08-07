@@ -9,6 +9,7 @@ from io import BytesIO
 from typing import Any, BinaryIO, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Union
 
 from .__about__ import __version__
+from .exceptions import EncodingError, LenticryptError
 from .iowrapper import get_length, IOWrappable, IOWrapper
 from .utils import FrozenDict
 
@@ -35,7 +36,7 @@ __all__ = [
     "read_nibbles",
 ]
 
-logger = logging.getLogger(name='lenticrypt')
+logger = logging.getLogger(name="lenticrypt")
 
 # The version of the ciphertext file format, independent of the package version: bumping one does
 # not imply bumping the other. Prior releases conflated them by encoding this as the semver minor.
@@ -62,77 +63,116 @@ NibbleGramTypeHint = Generator[bytes, None, None]
 
 def read_nibble_grams(byte_array: Sequence[int], length: int = 1) -> NibbleGramTypeHint:
     if not is_power2(length):
-        raise ValueError(f'length must be a power of two; received {length}')
+        raise ValueError(f"length must be a power of two; received {length}")
 
-    return (bytes(ng) for ng in zip(*(itertools.islice(nibbles, i, None) for i, nibbles in enumerate(itertools.tee(read_nibbles(byte_array), length)))))
+    return (
+        bytes(ng)
+        for ng in zip(
+            *(
+                itertools.islice(nibbles, i, None)
+                for i, nibbles in enumerate(itertools.tee(read_nibbles(byte_array), length))
+            )
+        )
+    )
 
 
 NibbleGramsTypeHint = Dict[Tuple[bytes, ...], array.array]
 CommonNibbleGramsTypeHint = Dict[int, NibbleGramsTypeHint]
 
 
-def find_common_nibble_grams(certificates: Sequence[Sequence[int]],
-                             nibble_gram_lengths=(1, 2, 4, 8, 16),
-                             status_callback: StatusCallbackTypeHint = None,
-                             stop_when_sufficient: bool = False) -> CommonNibbleGramsTypeHint:
-    all_nibbles: CommonNibbleGramsTypeHint = {} # maps a nibble value to a common index
+def find_common_nibble_grams(
+    certificates: Sequence[Sequence[int]],
+    nibble_gram_lengths=(1, 2, 4, 8, 16),
+    status_callback: StatusCallbackTypeHint = None,
+    stop_when_sufficient: bool = False,
+) -> CommonNibbleGramsTypeHint:
+    all_nibbles: CommonNibbleGramsTypeHint = {}  # maps a nibble value to a common index
     min_cert_length = min(len(c) for c in certificates)
     for nibble_gram_length in nibble_gram_lengths:
-        nibbles: NibbleGramsTypeHint = defaultdict(lambda: array.array('L'))
+        nibbles: NibbleGramsTypeHint = defaultdict(lambda: array.array("L"))
         all_nibbles[nibble_gram_length] = nibbles
         range_max = min_cert_length * 2 - nibble_gram_length + 1
-        for index, pair in enumerate(zip(*(read_nibble_grams(c, nibble_gram_length) for c in certificates))):
+        for index, pair in enumerate(
+            zip(*(read_nibble_grams(c, nibble_gram_length) for c in certificates))
+        ):
             nibbles[pair].append(index)
-            if stop_when_sufficient and len(nibbles) >= (16*nibble_gram_length) ** len(certificates):
+            if stop_when_sufficient and len(nibbles) >= (16 * nibble_gram_length) ** len(
+                certificates
+            ):
                 return all_nibbles
             if status_callback is not None:
-                status_callback(index, range_max, "Building Index for %s-nibble-grams" % nibble_gram_length)
+                status_callback(
+                    index, range_max, "Building Index for %s-nibble-grams" % nibble_gram_length
+                )
     return all_nibbles
 
 
+READ_BLOCK_BYTES = 4096
+
+# The block header allocates four bits to `length - 1`, so grams longer than this cannot be encoded.
+MAX_NIBBLE_GRAM_LENGTH = 16
+
+# Distinct unencodable gram tuples to name in the log before falling back to a bare count.
+MAX_REPORTED_UNENCODABLE = 16
+
+# Report progress every this many consumed nibbles, rather than on every single one.
+PROGRESS_INTERVAL_NIBBLES = 1024
+
+
 class BufferedNibbleGramReader:
-    def __init__(self, stream: BinaryIO, max_nibble_gram_length: int = None):
+    """Reads a byte stream as a stream of nibbles, with lookahead.
+
+    `peek_nibbles(length)` returns either exactly `length` nibbles or `None`. That guarantee is what
+    the encrypters rely on: previously `has_nibbles` appended whatever a short read produced and
+    returned `True` regardless, so `peek_nibbles` could hand back fewer nibbles than asked for.
+    """
+
+    def __init__(self, stream: BinaryIO):
         self.stream = stream
-        self.max_nibble_gram_length = max_nibble_gram_length
         self._buffer: Optional[bytearray] = bytearray()
         self.has_nibbles(1)
 
     def get_nibbles(self, length: int) -> Optional[bytes]:
-        r = self.peek_nibbles(length)
-        if r is not None and self._buffer is not None:
+        """Consumes and returns `length` nibbles, or returns `None` without consuming anything."""
+        nibbles = self.peek_nibbles(length)
+        if nibbles is not None and self._buffer is not None:
             del self._buffer[:length]
-        return r
+        return nibbles
 
     def peek_nibbles(self, length: int) -> Optional[bytes]:
-        if self._buffer is None or not self.has_nibbles(length):
+        """Returns exactly `length` nibbles without consuming them, or `None` if unavailable."""
+        if not self.has_nibbles(length):
             return None
-        else:
-            return bytes(self._buffer[:length])
+        # has_nibbles() only returns True with a live buffer holding at least `length` nibbles; the
+        # re-check keeps that provable rather than asserted, since asserts vanish under -O.
+        buffer = self._buffer
+        return None if buffer is None else bytes(buffer[:length])
 
     def has_nibbles(self, length: int) -> bool:
+        """Whether `length` nibbles can be supplied, reading more of the stream if needed."""
         if self._buffer is None:
             return False
-        elif len(self._buffer) >= length:
-            return True
-        b = self.stream.read((length - len(self._buffer) + 1)//2)
-        if not b:
-            if len(self._buffer) == 0:
-                # we are done
-                self._buffer = None
-            return False
-        else:
-            for byte in b:
+        # Keep reading until we genuinely have enough. A short read means the stream is nearly
+        # exhausted, not that the request can be satisfied.
+        while len(self._buffer) < length:
+            block = self.stream.read(max(READ_BLOCK_BYTES, (length - len(self._buffer) + 1) // 2))
+            if not block:
+                if not self._buffer:
+                    # Nothing buffered and nothing left to read: this reader is finished. `None` is
+                    # the end-of-stream sentinel that `eof()` reports.
+                    self._buffer = None
+                return False
+            for byte in block:
                 self._buffer.append((byte & 0b11110000) >> 4)
                 self._buffer.append(byte & 0b00001111)
-            return True
+        return True
 
-    def eof(self):
+    def eof(self) -> bool:
+        """Whether the stream is exhausted *and* nothing remains buffered."""
         return self._buffer is None
 
-    def __bool__(self):
+    def __bool__(self) -> bool:
         return not self.eof()
-
-    __nonzero__ = __bool__
 
 
 # block header, 8 bits:
@@ -142,17 +182,26 @@ class BufferedNibbleGramReader:
 #       |-| <-- If 1, then the following 7 bits are a filetype version number and the following blocks are the encrypted 8 bytes encoding the length of the file
 class Encrypter(object):
     def __init__(
-            self,
-            substitution_alphabet: CommonNibbleGramsTypeHint,
-            to_encrypt: Sequence[BinaryIO],
-            status_callback: StatusCallbackTypeHint = None):
+        self,
+        substitution_alphabet: CommonNibbleGramsTypeHint,
+        to_encrypt: Sequence[BinaryIO],
+        status_callback: StatusCallbackTypeHint = None,
+    ):
         self.substitution_alphabet = substitution_alphabet
         self.to_encrypt = to_encrypt
         self.sorted_lengths = sorted(substitution_alphabet.keys(), reverse=True)
-        self.buffer_lengths = None
+        if self.sorted_lengths and self.sorted_lengths[0] > MAX_NIBBLE_GRAM_LENGTH:
+            # Validated once here rather than per block: the block header only allocates four bits
+            # for the length, so longer grams cannot be represented at all.
+            message = (
+                f"Lenticrypt's encoding supports nibble-gram lengths up to "
+                f"{MAX_NIBBLE_GRAM_LENGTH}; got {self.sorted_lengths[0]}"
+            )
+            raise EncodingError(message)
         self.status_callback = status_callback
-        if self.status_callback is not None:
-            self.buffer_lengths = [get_length(b) for b in self.to_encrypt]
+        self.buffer_lengths = [get_length(b) for b in self.to_encrypt]
+        self._unencodable: set[Tuple[bytes, ...]] = set()
+        self._unencodable_count = 0
 
     def get_header(self):
         return iter([])
@@ -160,109 +209,152 @@ class Encrypter(object):
     def is_incomplete(self, buffers) -> bool:
         return bool(buffers[0])
 
-    def get_max_length(self):
-        if self.status_callback is None:
-            return None
+    def total_nibbles(self) -> int:
+        """Total nibbles this encrypter will consume, as an exact progress denominator.
+
+        Replaces `get_max_length()`, whose result was multiplied by a guess at the number of
+        attempts per byte, so progress bars over- or under-shot depending on the inputs.
+        """
+        return self.buffer_lengths[0] * 2
+
+    def pad_nibble_gram(self, buffer_index: int, length: int) -> Optional[bytes]:
+        """The substitute gram for a plaintext that has run out, or `None` to stop encrypting.
+
+        Only ever called for a reader that is genuinely at end of stream. Returning `None` makes the
+        gram unusable at this length, which is how the base class stops at the first plaintext's
+        length.
+        """
+        return b"\0" * length if buffer_index > 0 else None
+
+    def _grams_at(
+        self, readers: Sequence[BufferedNibbleGramReader], length: int
+    ) -> Optional[Tuple[bytes, ...]]:
+        """Every reader's nibble-gram at `length`, or `None` if they cannot all supply one.
+
+        A reader that still holds real data but fewer than `length` nibbles yields `None` here, so
+        the caller falls back to a shorter length. Padding it instead would overwrite live
+        plaintext -- which is precisely how ciphertexts used to be corrupted.
+        """
+        grams = []
+        for index, reader in enumerate(readers):
+            gram = reader.peek_nibbles(length)
+            if gram is None:
+                if not reader.eof():
+                    return None
+                gram = self.pad_nibble_gram(index, length)
+                if gram is None:
+                    return None
+            grams.append(gram)
+        return tuple(grams)
+
+    def can_encode(self, grams: Tuple[bytes, ...], length: int) -> bool:
+        """Whether this gram tuple can be represented as a ciphertext block."""
+        return grams in self.substitution_alphabet[length]
+
+    def encode_block(self, grams: Tuple[bytes, ...], length: int) -> bytes:
+        """Encodes one accepted gram tuple as a ciphertext block."""
+        index = random.choice(self.substitution_alphabet[length][grams])
+        if index < 256:
+            index_bytes, index_type = 1, "B"  # unsigned char
+        elif index < 65536:
+            index_bytes, index_type = 2, "H"  # unsigned short
+        elif index < 4294967296:
+            index_bytes, index_type = 4, "L"  # unsigned long
         else:
-            return self.buffer_lengths[0]
+            index_bytes, index_type = 8, "Q"  # unsigned long long
+        block_header = ((length - 1) << 3) | (index_bytes - 1)
+        return struct.pack("<B" + index_type, block_header, index)
 
-    def process_nibble(self, n: Optional[bytes], buffer_index: int, length: int) -> Optional[bytes]:
-        if n is None and buffer_index > 0:
-            return b'\0'*length
-        else:
-            return n
+    def _warn_unencodable(self, grams: Tuple[bytes, ...]) -> None:
+        """Warns once per distinct gram tuple, so weak secrets cannot flood the log."""
+        self._unencodable_count += 1
+        if grams in self._unencodable or len(self._unencodable) >= MAX_REPORTED_UNENCODABLE:
+            return
+        self._unencodable.add(grams)
+        logger.warning(
+            f"There is insufficient entropy in the input secrets to encode the byte pair "
+            f"{grams!r}! The resulting ciphertext will not decrypt to the correct plaintext."
+        )
 
-    def get_tuple(self, ng: Tuple[Optional[bytes], ...], length) -> Optional[Tuple[Optional[bytes], ...]]:
-        if None in ng or max(len(n) for n in ng) < length:
-            return None
-        else:
-            return ng
+    def consume_grams(
+        self, readers: Sequence[BufferedNibbleGramReader], phase: str
+    ) -> Generator[Tuple[int, Tuple[bytes, ...]], None, None]:
+        """Walks the plaintexts in lockstep, yielding each `(length, grams)` that can be encoded.
 
-    def are_valid_nibbles(self, ng: Tuple[Optional[bytes], ...], length):
-        return not (None in ng or max(len(n) for n in ng) < length)
-
-    def process_nibbles(self, pair: Tuple[bytes, ...], length: int, buffers) -> Generator[int, None, None]:
-        if length > 16:
-            # if we want to support longer lengths, we will have to allocate more bits in the header, pearhaps using the currently used one
-            raise Exception("Lenticrypt's encoding currently only supports nibble gram lengths up to 16")
-        if pair in self.substitution_alphabet[length]:
-            # consume the nibbles!
-            for b in buffers:
-                b.get_nibbles(length)
-            index = random.choice(self.substitution_alphabet[length][pair])
-            index_bytes = 8
-            index_type = "Q" # unsigned long long
-            if index < 256:
-                index_bytes = 1
-                index_type = "B" # unsigned char
-            elif index < 65536:
-                index_bytes = 2
-                index_type = "H" # unsigned short
-            elif index < 4294967296:
-                index_bytes = 4
-                index_type = "L" # unsigned long
-            block_header = ((length - 1) << 3) | (index_bytes - 1)
-            yield from iter(struct.pack("<B" + index_type, block_header, index))
-        elif length == 1:
-            logger.warning(f"There is insufficient entropy in the input secrets to encode the byte pair {pair!r}! The resulting ciphertext will not decrypt to the correct plaintext.")
-            # consume these bytes
-            for b in buffers:
-                b.get_nibbles(length)
-
-    def __iter__(self):
-        yield from self.get_header()
-        max_length = self.get_max_length()
-        if self.status_callback is not None:
-            max_length *= len(self.sorted_lengths) * 2
-        count = 0
-        buffers = [BufferedNibbleGramReader(e, self.sorted_lengths[0]) for e in self.to_encrypt]
-        while self.is_incomplete(buffers):
-            # if the files are not the same length, encrypt to the length of to_encrypt1
-            for length_num, length in enumerate(self.sorted_lengths):
-                if self.status_callback is not None:
-                    count += 1
-                    self.status_callback(count, max_length, "Encrypting")
-                ng = tuple(self.process_nibble(b.peek_nibbles(length), i, length) for i, b in enumerate(buffers))
-                if not self.are_valid_nibbles(ng, length):
+        This is the only place nibbles are consumed, so it is structurally impossible to emit a
+        block for nibbles that were not consumed -- the desynchronisation that corrupted output.
+        Longest gram lengths are tried first; a length that cannot be represented falls back to a
+        shorter one, and at length 1 the nibbles are consumed with a warning so that the walk always
+        makes progress.
+        """
+        total = self.total_nibbles()
+        consumed = 0
+        while self.is_incomplete(readers):
+            for length in self.sorted_lengths:
+                grams = self._grams_at(readers, length)
+                if grams is None:
                     continue
-                success = False
-                for byte in self.process_nibbles(ng, length, buffers):
-                    success = True
-                    yield byte
-                    if self.status_callback is not None:
-                        count += len(self.sorted_lengths) - (length_num + 1)
-                if success:
-                    break
+                encodable = self.can_encode(grams, length)
+                if not encodable and length != 1:
+                    continue
+                for reader in readers:
+                    reader.get_nibbles(length)
+                if encodable:
+                    yield length, grams
+                else:
+                    self._warn_unencodable(grams)
+                consumed += length
+                if self.status_callback is not None and consumed % PROGRESS_INTERVAL_NIBBLES == 0:
+                    self.status_callback(consumed, total, phase)
+                break
+            else:
+                # No length made progress. Normally that means `peek_nibbles` has only just
+                # discovered end of stream -- exhaustion is detected lazily, on the read that fails,
+                # so `is_incomplete` can still have been true on entry. Re-test it and stop cleanly
+                # if we are genuinely finished; otherwise the walk really is stuck.
+                if self.is_incomplete(readers):  # pragma: no cover - guarded invariant
+                    message = (
+                        "Unable to encode at any nibble-gram length while plaintext remains. "
+                        "Length 1 should always consume; please report this as a bug."
+                    )
+                    raise LenticryptError(message)
+                break
+        if self._unencodable_count:
+            logger.warning(
+                f"{self._unencodable_count} nibble-gram(s) could not be encoded; the ciphertext "
+                "will not decrypt to the correct plaintext."
+            )
+
+    def __iter__(self) -> Generator[int, None, None]:
+        yield from self.get_header()
+        readers = [BufferedNibbleGramReader(stream) for stream in self.to_encrypt]
+        for length, grams in self.consume_grams(readers, "Encrypting"):
+            yield from self.encode_block(grams, length)
 
 
 class LengthChecksumEncrypter(Encrypter):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
     def get_encryption_version(self):
         return 2
 
-    def is_incomplete(self, buffers):
-        return sum(1 for b in buffers if not b.eof())
+    def is_incomplete(self, buffers) -> bool:
+        return any(not b.eof() for b in buffers)
 
-    def get_max_length(self):
-        if self.status_callback is None:
-            return None
-        else:
-            return max(self.buffer_lengths)
+    def total_nibbles(self) -> int:
+        return max(self.buffer_lengths) * 2
 
-    def are_valid_nibbles(self, ng, length):
-        return max(len(n) for n in ng) >= length
+    def pad_nibble_gram(self, buffer_index: int, length: int) -> Optional[bytes]:  # noqa: ARG002
+        """Pads every exhausted plaintext with random nibbles, regardless of which one it is.
 
-    def process_nibble(self, n: Optional[bytes], buffer_index, length) -> Optional[bytes]:
-        if n is None:
-            # if we are using a length checksum, we can make the padded bytes random:
-            return bytes([random.randint(0, 15) for _ in range(length)])
-        else:
-            return n
+        Safe because the length header lets decryption truncate, and random padding is better for
+        deniability than zeros. Only reached for readers genuinely at end of stream -- padding one
+        that still held data is what corrupted plaintexts.
+        """
+        return bytes(random.randint(0, 15) for _ in range(length))
 
     def get_header(self):
-        block_header = 0b10000000 | self.get_encryption_version() # the magic length checksum bit and filetype version number
+        block_header = (
+            0b10000000 | self.get_encryption_version()
+        )  # the magic length checksum bit and filetype version number
         yield block_header
         lengths = tuple(BytesIO(struct.pack("<Q", get_length(l))) for l in self.to_encrypt)
         try:
@@ -272,15 +364,21 @@ class LengthChecksumEncrypter(Encrypter):
                 length.close()
 
 
-encoding_steps = [(0b01111111, 0),
-                  (0b00111111, 0b10000000),
-                  (0b00011111, 0b11000000),
-                  (0b00001111, 0b11100000),
-                  (0b00000111, 0b11110000),
-                  (0b00000011, 0b11111000),
-                  (0b00000001, 0b11111100)]
+encoding_steps = [
+    (0b01111111, 0),
+    (0b00111111, 0b10000000),
+    (0b00011111, 0b11000000),
+    (0b00001111, 0b11100000),
+    (0b00000111, 0b11110000),
+    (0b00000011, 0b11111000),
+    (0b00000001, 0b11111100),
+]
 
-MAX_ENCODE_VALUE = 2**(8*(len(encoding_steps)-1)) + (encoding_steps[-1][0] << (8*(len(encoding_steps)-1))) - 1
+MAX_ENCODE_VALUE = (
+    2 ** (8 * (len(encoding_steps) - 1))
+    + (encoding_steps[-1][0] << (8 * (len(encoding_steps) - 1)))
+    - 1
+)
 
 
 def encode(n: int) -> bytearray:
@@ -292,7 +390,9 @@ def encode(n: int) -> bytearray:
             return ret
         n >>= 8
         ret = bytearray([n & 0b11111111]) + ret
-    raise Exception(f"Integer {orig_n} is too big to encode!  The biggest value supported is {MAX_ENCODE_VALUE}.")
+    raise Exception(
+        f"Integer {orig_n} is too big to encode!  The biggest value supported is {MAX_ENCODE_VALUE}."
+    )
 
 
 def decode(byte_array: Union[bytes, bytearray, BinaryIO]) -> Optional[int]:
@@ -340,67 +440,66 @@ def decode(byte_array: Union[bytes, bytearray, BinaryIO]) -> Optional[int]:
         if to_close is not None:
             to_close.close()
 
+
 # An encrypter for version 3 of the file spec.
 class DictionaryEncrypter(LengthChecksumEncrypter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.dictionary: Dict[Tuple[bytes, ...], int] = {}
         self.dictionary_items: List[Tuple[bytes, ...]] = []
+        # `can_encode` consults the substitution alphabet while building and the dictionary
+        # afterwards; an explicit flag rather than testing the dictionary for emptiness.
+        self._dictionary_built = False
         self.build_dictionary()
+        self._dictionary_built = True
 
     def get_encryption_version(self):
         return 3
 
     def build_dictionary(self):
-        max_length = self.get_max_length()
-        if self.status_callback is not None:
-            max_length *= len(self.sorted_lengths) * 2
-        count = 0
-        buffers = [BufferedNibbleGramReader(e, self.sorted_lengths[0]) for e in self.to_encrypt]
+        buffers = [BufferedNibbleGramReader(e) for e in self.to_encrypt]
         dictionary_hits: Dict[Tuple[bytes, ...], int] = {}
+        # NOTE: this walk still has no length-1 fallback, so it cannot make progress when the
+        # secrets lack the entropy to encode a byte. Fixed separately.
         while self.is_incomplete(buffers):
-            # if the files are not the same length, encrypt to the length of to_encrypt1
-            for length_num, length in enumerate(self.sorted_lengths):
-                if self.status_callback is not None:
-                    count += 1
-                    self.status_callback(count, max_length, "Building Dictionary")
-                pair = tuple(self.process_nibble(b.peek_nibbles(length), i, length) for i, b in enumerate(buffers))
-                if not self.are_valid_nibbles(pair, length):
+            for length in self.sorted_lengths:
+                pair = self._grams_at(buffers, length)
+                if pair is None or not self.can_encode(pair, length):
                     continue
-                if pair in self.substitution_alphabet[length]:
-                    # consume the nibbles!
-                    for b in buffers:
-                        b.get_nibbles(length)
-                    if pair not in dictionary_hits:
-                        self.dictionary_items.append(pair)
-                        dictionary_hits[pair] = 1
-                    else:
-                        dictionary_hits[pair] += 1
-                    if self.status_callback is not None:
-                        count += len(self.sorted_lengths) - (length_num + 1)
-                    break
+                for b in buffers:
+                    b.get_nibbles(length)
+                if pair not in dictionary_hits:
+                    self.dictionary_items.append(pair)
+                    dictionary_hits[pair] = 1
+                else:
+                    dictionary_hits[pair] += 1
+                break
         # make sure that the dictionary contains all of the 1-nibble grams:
-        missing_grams = set(itertools.product(*[[bytes([j]) for j in range(16)] for _ in range(len(self.to_encrypt))]))
+        missing_grams = set(
+            itertools.product(
+                *[[bytes([j]) for j in range(16)] for _ in range(len(self.to_encrypt))]
+            )
+        )
         for missing in missing_grams - dictionary_hits.keys():
             self.dictionary_items.append(missing)
             dictionary_hits[missing] = 1
-        self.dictionary_items = sorted(self.dictionary_items, key=lambda p: dictionary_hits[p], reverse=True)
+        self.dictionary_items = sorted(
+            self.dictionary_items, key=lambda p: dictionary_hits[p], reverse=True
+        )
         self.dictionary = {v: idx for idx, v in enumerate(self.dictionary_items)}
         # reset the files back to their first bytes
         for e in self.to_encrypt:
             e.seek(0)
 
-    def process_nibbles(self, pair, length, buffers):
-        if pair in self.dictionary:
-            # consume the nibbles!
-            for b in buffers:
-                b.get_nibbles(length)
-            yield from iter(encode(self.dictionary[pair]))
-        elif length == 1:
-            logger.warning(f"There is insufficient entropy in the input secrets to encode the byte pair {pair}! The resulting ciphertext will not decrypt to the correct plaintext.")
-            # consume these bytes
-            for b in buffers:
-                b.get_nibbles(length)
+    def can_encode(self, grams: Tuple[bytes, ...], length: int) -> bool:
+        # While encrypting, the dictionary is the authority; while building it, the base class's
+        # substitution-alphabet check is used instead.
+        if self._dictionary_built:
+            return grams in self.dictionary
+        return super().can_encode(grams, length)
+
+    def encode_block(self, grams: Tuple[bytes, ...], length: int) -> bytes:
+        return encode(self.dictionary[grams])
 
     def get_header(self):
         yield from super().get_header()
@@ -414,12 +513,7 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
             yield lp
 
 
-index_type_map = FrozenDict({
-    1: 'B',
-    2: 'H',
-    4: 'L',
-    8: 'Q'
-})
+index_type_map = FrozenDict({1: "B", 2: "H", 4: "L", 8: "Q"})
 
 
 def _decrypt_dictionary(stream, file_length, cert):
@@ -438,7 +532,9 @@ def _decrypt_dictionary(stream, file_length, cert):
     while num_bytes < file_length:
         dict_index = decode(stream)
         if dict_index >= len(dictionary):
-            raise Exception(f"Invalid dictionary index {dict_index}!  Maximum valid index is {len(dictionary)-1}.")
+            raise Exception(
+                f"Invalid dictionary index {dict_index}!  Maximum valid index is {len(dictionary) - 1}."
+            )
         index, length = dictionary[dict_index]
         if length == 1:
             if last_nibble is None:
@@ -448,21 +544,23 @@ def _decrypt_dictionary(stream, file_length, cert):
                 last_nibble = None
                 num_bytes += 1
         else:
-            nibbles = cert[index:index+length]
+            nibbles = cert[index : index + length]
             if last_nibble is not None:
                 yield last_nibble | nibbles[0]
                 num_bytes += 1
                 last_nibble = nibbles[-1] << 4
                 nibbles = nibbles[1:-1]
-            for index in range(0,len(nibbles),2):
-                yield (nibbles[index] << 4) | nibbles[index+1]
+            for index in range(0, len(nibbles), 2):
+                yield (nibbles[index] << 4) | nibbles[index + 1]
                 num_bytes += 1
 
 
-def decrypt(ciphertext: IOWrappable,
-            certificate: Optional[IOWrappable],
-            cert: Optional[bytearray] = None,
-            file_length: Optional[int] = None) -> Generator[int, None, None]:
+def decrypt(
+    ciphertext: IOWrappable,
+    certificate: Optional[IOWrappable],
+    cert: Optional[bytearray] = None,
+    file_length: Optional[int] = None,
+) -> Generator[int, None, None]:
     # the file format is specified in a comment at the top of the encrypt(...) function above.
     if cert is None:
         cert = bytearray()
@@ -487,7 +585,9 @@ def decrypt(ciphertext: IOWrappable,
                 version = header & 0b01111111
                 logger.info(f"Found length header. File format version is {version}")
                 if version > ENCRYPTION_VERSION:
-                    logger.warning(f"This ciphertext appears to have been encrypted with a newer version of the cryptosystem (version {(version / 10.0)!s}).")
+                    logger.warning(
+                        f"This ciphertext appears to have been encrypted with a newer version of the cryptosystem (version {(version / 10.0)!s})."
+                    )
                 # the next 8 encrypted bytes encode the length of the plaintext
                 raw_length = bytearray(decrypt(stream, None, cert=cert, file_length=8))
                 file_length = struct.unpack("<Q", raw_length)[0]
@@ -498,14 +598,18 @@ def decrypt(ciphertext: IOWrappable,
                 continue
             index_bytes = (header & 0b00000111) + 1
             if index_bytes not in index_type_map:
-                raise Exception(f"Invalid block header: Received an invalid index byte length of {index_bytes!s} bytes!")
+                raise Exception(
+                    f"Invalid block header: Received an invalid index byte length of {index_bytes!s} bytes!"
+                )
             length = ((header >> 3) & 0b00001111) + 1
             index = stream.read(index_bytes)
             if not index:
                 break
             n = struct.unpack("<" + index_type_map[index_bytes], index)[0]
             if n >= len(cert):
-                logger.warning(f"Decrypted invalid certificate index {n} (maximum value is {len(cert)-1})")
+                logger.warning(
+                    f"Decrypted invalid certificate index {n} (maximum value is {len(cert) - 1})"
+                )
                 if last_nibble is not None:
                     yield last_nibble
                     num_bytes += 1
@@ -528,7 +632,7 @@ def decrypt(ciphertext: IOWrappable,
                     if file_length is not None and num_bytes >= file_length:
                         return
             else:
-                nibbles = cert[n:n+length]
+                nibbles = cert[n : n + length]
                 if last_nibble is not None:
                     yield last_nibble | nibbles[0]
                     num_bytes += 1
@@ -540,7 +644,7 @@ def decrypt(ciphertext: IOWrappable,
                     if index == len(nibbles) - 1:
                         last_nibble = nibbles[index] << 4
                     else:
-                        yield (nibbles[index] << 4) | nibbles[index+1]
+                        yield (nibbles[index] << 4) | nibbles[index + 1]
                         num_bytes += 1
                         if file_length is not None and num_bytes >= file_length:
                             return
