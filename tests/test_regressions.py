@@ -128,11 +128,11 @@ def test_three_secret_roundtrip(alphabet_3, keys_3):
 
 
 def test_dictionary_encrypter_terminates_on_weak_keys():
-    """`build_dictionary` loops forever on low-entropy secrets.
+    """`build_dictionary` used to loop forever on low-entropy secrets.
 
-    Unlike `process_nibbles` it has no `elif length == 1:` fallback, so when no nibble-gram length
-    matches, nothing is consumed and the `while self.is_incomplete(buffers)` loop spins. Run in a
-    subprocess so a hang is a timeout rather than a wedged test session.
+    It had its own walk with no `length == 1` fallback, so when no nibble-gram length matched,
+    nothing was consumed and `while self.is_incomplete(buffers)` spun -- the `-f/--force-encrypt`
+    case. Run in a subprocess so a regression is a timeout rather than a wedged test session.
     """
     program = """
 import io, sys
@@ -155,9 +155,38 @@ else:
             timeout=20,
         )
     except subprocess.TimeoutExpired:
-        pytest.xfail("build_dictionary spins forever when the secrets lack entropy")
-    # Once it terminates it must do so cleanly, not by raising IndexError out of get_header.
+        pytest.fail("build_dictionary hung: the length-1 fallback has regressed")
+    # It must also terminate *cleanly*. Force-adding every 16**n single-nibble gram, including ones
+    # the alphabet cannot encode, made get_header raise IndexError off a defaultdict's empty array.
     assert "completed" in result.stdout, result.stdout + result.stderr
+
+
+def test_dictionary_header_survives_unencodable_grams(weak_keys):
+    """Building a dictionary from secrets that cannot encode every byte must still emit a header."""
+    alphabet = find_common_nibble_grams(weak_keys)
+    plaintexts = [io.BytesIO(bytes([1, 2, 3, 4])), io.BytesIO(bytes([5, 6, 7, 8]))]
+    encrypter = DictionaryEncrypter(alphabet, plaintexts)
+    assert bytes(encrypter.get_header())
+    # Only grams the alphabet can actually encode may enter the dictionary.
+    for grams in encrypter.dictionary_items:
+        assert grams in alphabet[len(grams[0])]
+
+
+def test_seeded_encryption_is_reproducible(alphabet_2):
+    """`--seed` promised reproducible output but did not deliver it.
+
+    build_dictionary iterated `missing_grams - dictionary_hits.keys()`, a set difference over tuples
+    of `bytes`, whose iteration order varies with PYTHONHASHSEED. Dictionary indices therefore
+    differed between runs even at a fixed seed. Sorting the entries fixes it; this test pins it
+    within a process, and test_cli covers it across processes with differing hash seeds.
+    """
+    plaintexts = make_plaintexts((128, 128))
+
+    def encrypt_once():
+        random.seed(4242)
+        return bytes(DictionaryEncrypter(alphabet_2, [io.BytesIO(p) for p in plaintexts]))
+
+    assert encrypt_once() == encrypt_once()
 
 
 # --------------------------------------------------------------------------------------------------
