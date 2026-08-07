@@ -12,6 +12,29 @@ from .__about__ import __version__
 from .iowrapper import get_length, IOWrappable, IOWrapper
 from .utils import FrozenDict
 
+__all__ = [
+    "ENCRYPTION_VERSION",
+    "MAX_ENCODE_VALUE",
+    "VERSION",
+    "BufferedNibbleGramReader",
+    "CommonNibbleGramsTypeHint",
+    "DictionaryEncrypter",
+    "Encrypter",
+    "LengthChecksumEncrypter",
+    "NibbleGramTypeHint",
+    "NibbleGramsTypeHint",
+    "StatusCallbackTypeHint",
+    "decode",
+    "decrypt",
+    "encode",
+    "encoding_steps",
+    "find_common_nibble_grams",
+    "index_type_map",
+    "is_power2",
+    "read_nibble_grams",
+    "read_nibbles",
+]
+
 logger = logging.getLogger(name='lenticrypt')
 
 # The version of the ciphertext file format, independent of the package version: bumping one does
