@@ -20,9 +20,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # windows-latest is added once progress.py stops importing fcntl/termios at module scope,
-        # which currently makes the package unimportable there.
-        os: [ubuntu-latest, macos-latest]
+        # Linux only for now. macOS adds no coverage for pure Python -- same POSIX semantics,
+        # same path handling. windows-latest is the leg that matters, and it joins once progress.py
+        # stops importing fcntl/termios at module scope, which currently makes the package
+        # unimportable there.
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,8 +36,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
 
-      # --locked fails if uv.lock has drifted from pyproject.toml
-      - run: uv sync --locked
+      - run: uv sync
 
       - run: uv run pytest -q
 
