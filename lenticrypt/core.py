@@ -46,6 +46,7 @@ __all__ = [
     "StatusCallbackTypeHint",
     "decode",
     "decrypt",
+    "decrypt_chunks",
     "encode",
     "encoding_steps",
     "find_common_nibble_grams",
@@ -71,6 +72,9 @@ OFFSET_TYPECODE = "I"
 
 # Report progress every 1024 offsets rather than on every one.
 PROGRESS_MASK = 0x3FF
+
+# Default granularity for the chunked encrypt and decrypt paths.
+CHUNK_SIZE = 1 << 16
 
 # The version of the ciphertext file format, independent of the package version: bumping one does
 # not imply bumping the other. Prior releases conflated them by encoding this as the semver minor.
@@ -321,8 +325,9 @@ class Encrypter(object):
         self._unencodable: set[Tuple[bytes, ...]] = set()
         self._unencodable_count = 0
 
-    def get_header(self):
-        return iter([])
+    def get_header(self) -> Iterator[bytes]:
+        """Yields the ciphertext header, as whole chunks."""
+        return iter(())
 
     def is_incomplete(self, buffers) -> bool:
         return bool(buffers[0])
@@ -365,13 +370,13 @@ class Encrypter(object):
             grams.append(gram)
         return tuple(grams)
 
-    def can_encode(self, grams: Tuple[bytes, ...], length: int) -> bool:
-        """Whether this gram tuple can be represented as a ciphertext block."""
-        return pack_grams(grams) in self.substitution_alphabet[length]
+    def can_encode(self, key: bytes, length: int) -> bool:
+        """Whether this packed gram key can be represented as a ciphertext block."""
+        return key in self.substitution_alphabet[length]
 
-    def encode_block(self, grams: Tuple[bytes, ...], length: int) -> bytes:
-        """Encodes one accepted gram tuple as a ciphertext block."""
-        index = random.choice(self.substitution_alphabet[length][pack_grams(grams)])
+    def encode_block(self, key: bytes, length: int) -> bytes:
+        """Encodes one accepted gram key as a ciphertext block."""
+        index = random.choice(self.substitution_alphabet[length][key])
         if index < 256:
             index_bytes, index_type = 1, "B"  # unsigned char
         elif index < 65536:
@@ -396,7 +401,7 @@ class Encrypter(object):
 
     def consume_grams(
         self, readers: Sequence[BufferedNibbleGramReader], phase: str
-    ) -> Generator[Tuple[int, Tuple[bytes, ...]], None, None]:
+    ) -> Generator[Tuple[int, bytes], None, None]:
         """Walks the plaintexts in lockstep, yielding each `(length, grams)` that can be encoded.
 
         This is the only place nibbles are consumed, so it is structurally impossible to emit a
@@ -416,13 +421,16 @@ class Encrypter(object):
                 grams = self._grams_at(readers, length)
                 if grams is None:
                     continue
-                encodable = self.can_encode(grams, length)
+                # Packed once per position. It used to be packed twice per emitted block, once for
+                # the membership test and again to look up the value.
+                key = pack_grams(grams)
+                encodable = self.can_encode(key, length)
                 if not encodable and length != 1:
                     continue
                 for reader in readers:
                     reader.get_nibbles(length)
                 if encodable:
-                    yield length, grams
+                    yield length, key
                 else:
                     self._warn_unencodable(grams)
                 consumed += length
@@ -448,11 +456,34 @@ class Encrypter(object):
                 f"{phase.lower()}; the ciphertext will not decrypt to the correct plaintext."
             )
 
-    def __iter__(self) -> Generator[int, None, None]:
+    def blocks(self) -> Iterator[bytes]:
+        """Yields the ciphertext as whole blocks, header first.
+
+        The natural unit of this cryptosystem: one block per encoded nibble-gram. `__iter__`
+        flattens it to individual ints for compatibility.
+        """
         yield from self.get_header()
         readers = [BufferedNibbleGramReader(stream) for stream in self.to_encrypt]
-        for length, grams in self.consume_grams(readers, "Encrypting"):
-            yield from self.encode_block(grams, length)
+        for length, key in self.consume_grams(readers, "Encrypting"):
+            yield self.encode_block(key, length)
+
+    def chunks(self, chunk_size: int = CHUNK_SIZE) -> Iterator[bytes]:
+        """Yields the ciphertext in chunks of roughly `chunk_size` bytes.
+
+        Lets a caller write the ciphertext out as it is produced, instead of holding all of it in
+        memory. `bytes(encrypter)` still works and is fine for small inputs.
+        """
+        buffer = bytearray()
+        for block in self.blocks():
+            buffer += block
+            if len(buffer) >= chunk_size:
+                yield bytes(buffer)
+                buffer.clear()
+        if buffer:
+            yield bytes(buffer)
+
+    def __iter__(self) -> Generator[int, None, None]:
+        yield from itertools.chain.from_iterable(self.blocks())
 
 
 class LengthChecksumEncrypter(Encrypter):
@@ -478,10 +509,12 @@ class LengthChecksumEncrypter(Encrypter):
         block_header = (
             0b10000000 | self.get_encryption_version()
         )  # the magic length checksum bit and filetype version number
-        yield block_header
-        lengths = tuple(BytesIO(struct.pack("<Q", get_length(l))) for l in self.to_encrypt)
+        yield bytes([block_header])
+        lengths = tuple(
+            BytesIO(struct.pack("<Q", get_length(stream))) for stream in self.to_encrypt
+        )
         try:
-            yield from iter(Encrypter(self.substitution_alphabet, lengths, status_callback=None))
+            yield from Encrypter(self.substitution_alphabet, lengths, status_callback=None).blocks()
         finally:
             for length in lengths:
                 length.close()
@@ -590,8 +623,7 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
         """
         readers = [BufferedNibbleGramReader(stream) for stream in self.to_encrypt]
         hits: Dict[bytes, int] = {}
-        for _length, grams in self.consume_grams(readers, "Building Dictionary"):
-            key = pack_grams(grams)
+        for _length, key in self.consume_grams(readers, "Building Dictionary"):
             hits[key] = hits.get(key, 0) + 1
         # Every single-nibble gram the secrets can encode needs an entry, so encryption can always
         # fall back to length 1. Weight 0 keeps observed grams ahead of these fillers.
@@ -615,20 +647,20 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
         for e in self.to_encrypt:
             e.seek(0)
 
-    def can_encode(self, grams: Tuple[bytes, ...], length: int) -> bool:
+    def can_encode(self, key: bytes, length: int) -> bool:
         # While encrypting, the dictionary is the authority; while building it, the base class's
         # substitution-alphabet check is used instead.
         if self._dictionary_built:
-            return pack_grams(grams) in self.dictionary
-        return super().can_encode(grams, length)
+            return key in self.dictionary
+        return super().can_encode(key, length)
 
-    def encode_block(self, grams: Tuple[bytes, ...], length: int) -> bytes:
-        return encode(self.dictionary[pack_grams(grams)])
+    def encode_block(self, key: bytes, length: int) -> bytes:
+        return encode(self.dictionary[key])
 
     def get_header(self):
         yield from super().get_header()
         # The dictionary itself: one (certificate offset, gram length) pair per entry.
-        yield from iter(encode(len(self.dictionary)))
+        yield encode(len(self.dictionary))
         for grams in self.dictionary_items:
             gram_length = unpack_gram_length(grams, len(self.to_encrypt))
             # An explicit check rather than `assert`, which vanishes under -O. build_dictionary only
@@ -640,8 +672,8 @@ class DictionaryEncrypter(LengthChecksumEncrypter):
                     f"no offset for it at length {gram_length}. Please report this as a bug."
                 )
                 raise LenticryptError(message)
-            yield from iter(encode(offsets[0]))
-            yield gram_length
+            yield encode(offsets[0])
+            yield bytes([gram_length])
 
 
 index_type_map = FrozenDict({1: "B", 2: "H", 4: "L", 8: "Q"})
@@ -823,6 +855,28 @@ def _decrypt_blocks(stream, cert: Sequence[int], assembler: "_NibbleAssembler") 
             f"{assembler.file_length} bytes"
         )
         raise MalformedCiphertextError(message)
+
+
+def decrypt_chunks(
+    ciphertext: IOWrappable,
+    certificate: IOWrappable | None = None,
+    *,
+    cert: Sequence[int] | None = None,
+    chunk_size: int = CHUNK_SIZE,
+) -> Iterator[bytes]:
+    """Decrypts `ciphertext`, yielding the plaintext in chunks of roughly `chunk_size` bytes.
+
+    Lets a caller write the plaintext out as it is recovered, rather than building the whole thing
+    in memory first.
+    """
+    buffer = bytearray()
+    for byte in decrypt(ciphertext, certificate, cert=cert):
+        buffer.append(byte)
+        if len(buffer) >= chunk_size:
+            yield bytes(buffer)
+            buffer.clear()
+    if buffer:
+        yield bytes(buffer)
 
 
 def decrypt(

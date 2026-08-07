@@ -1,11 +1,15 @@
-"""The nibble-gram index: expansion, packing, and adaptive length selection."""
+"""The nibble-gram index: expansion, packing, adaptive length selection, and chunked I/O."""
 
 import array
+import io
 import random
 
 import pytest
 
 from lenticrypt import (
+    DictionaryEncrypter,
+    decrypt,
+    decrypt_chunks,
     find_common_nibble_grams,
     nibbles_of,
     pack_grams,
@@ -14,6 +18,8 @@ from lenticrypt import (
     select_nibble_gram_lengths,
     unpack_gram_length,
 )
+
+from .conftest import make_keys, make_plaintexts
 
 
 class TestNibbleExpansion:
@@ -141,3 +147,47 @@ class TestIndex:
         certs = tuple(rng.randbytes(1 << 15) for _ in range(2))
         index = find_common_nibble_grams(certs, nibble_gram_lengths=(1,), stop_when_sufficient=True)
         assert len(index[1]) == 16**2
+
+
+@pytest.fixture(scope="module")
+def credentials():
+    """Keys, their index, and two plaintexts -- built once for the chunking tests."""
+    keys = make_keys(2)
+    return keys, find_common_nibble_grams(keys), make_plaintexts((4096, 4096))
+
+
+class TestChunkedOutput:
+    """Chunked encrypt and decrypt must produce exactly what the whole-buffer paths produce."""
+
+    @pytest.mark.parametrize("chunk_size", [1, 7, 64, 4096, 1 << 20])
+    def test_encrypt_chunks_reassemble_to_the_same_ciphertext(self, chunk_size, credentials):
+        _keys, alphabet, plaintexts = credentials
+        random.seed(11)
+        whole = bytes(DictionaryEncrypter(alphabet, [io.BytesIO(p) for p in plaintexts]))
+        random.seed(11)
+        chunked = b"".join(
+            DictionaryEncrypter(alphabet, [io.BytesIO(p) for p in plaintexts]).chunks(chunk_size)
+        )
+        assert chunked == whole
+
+    def test_chunks_respect_the_requested_size(self, credentials):
+        _keys, alphabet, plaintexts = credentials
+        random.seed(11)
+        sizes = [
+            len(c)
+            for c in DictionaryEncrypter(alphabet, [io.BytesIO(p) for p in plaintexts]).chunks(1024)
+        ]
+        # Every chunk but the last reaches the threshold; blocks are small, so none overshoot much.
+        assert all(1024 <= size < 1024 + 16 for size in sizes[:-1])
+        assert sizes[-1] <= 1024 + 16
+
+    @pytest.mark.parametrize("chunk_size", [1, 7, 64, 4096, 1 << 20])
+    def test_decrypt_chunks_reassemble_to_the_same_plaintext(self, chunk_size, credentials):
+        keys, alphabet, plaintexts = credentials
+        random.seed(11)
+        ciphertext = bytes(DictionaryEncrypter(alphabet, [io.BytesIO(p) for p in plaintexts]))
+        whole = bytes(decrypt(io.BytesIO(ciphertext), io.BytesIO(keys[0])))
+        chunked = b"".join(
+            decrypt_chunks(io.BytesIO(ciphertext), io.BytesIO(keys[0]), chunk_size=chunk_size)
+        )
+        assert chunked == whole == plaintexts[0]
